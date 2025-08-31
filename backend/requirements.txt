@@ -1,0 +1,28 @@
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Database & ORM
+supabase==2.0.2
+python-dotenv==1.0.0
+
+# Deep Learning
+torch>=2.6.0
+torchvision>=0.17.0
+torchaudio>=2.6.0
+numpy>=1.24.0
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# Image Processing
+imageio>=2.31.0
+
+# Utilities
+python-multipart>=0.0.6
+pydantic>=2.5.0
+requests>=2.31.0
+
+# Development
+pytest>=7.4.0
+black>=23.11.0
+flake8>=6.1.0
