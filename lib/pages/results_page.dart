@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:io';
 import '../utils/app_colors.dart';
 import '../utils/app_constants.dart';
 import '../utils/api_service.dart';
@@ -25,7 +26,7 @@ class ResultsPage extends StatelessWidget {
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: const Text(
-          'Scan Results',
+          'Scanned Coffee Bean Result',
           style: TextStyle(color: Colors.white),
         ),
       ),
@@ -35,15 +36,13 @@ class ResultsPage extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildHeader(),
+              _buildImagePreview(),
               const SizedBox(height: AppConstants.largeSpacing),
-              _buildPredictionCard(),
+              _buildInfoCard(),
               const SizedBox(height: AppConstants.largeSpacing),
-              _buildConfidenceBar(),
-              const SizedBox(height: AppConstants.largeSpacing),
-              _buildAllProbabilities(),
+              _buildHealthTiles(),
               const Spacer(),
-              _buildActionButtons(context),
+              _buildYesNoButtons(context),
             ],
           ),
         ),
@@ -51,203 +50,131 @@ class ResultsPage extends StatelessWidget {
     );
   }
 
-  Widget _buildHeader() {
-    return const Text(
-      'Bean Type Analysis',
-      style: TextStyle(
-        fontSize: 24,
-        fontWeight: FontWeight.bold,
-        color: Colors.white,
-      ),
-    );
-  }
-
-  Widget _buildPredictionCard() {
+  Widget _buildImagePreview() {
     return Container(
+      height: 210,
       width: double.infinity,
-      padding: const EdgeInsets.all(AppConstants.largePadding),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Colors.white.withOpacity(0.15),
         borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-            offset: const Offset(0, 5),
-          ),
-        ],
+        border: Border.all(color: Colors.white24),
       ),
-      child: Column(
-        children: [
-          const Icon(
-            Icons.coffee,
-            size: 48,
-            color: AppColors.primaryBrown,
-          ),
-          const SizedBox(height: AppConstants.mediumSpacing),
-          Text(
-            prediction.prediction,
-            style: const TextStyle(
-              fontSize: 28,
-              fontWeight: FontWeight.bold,
-              color: AppColors.textDarkGrey,
+      clipBehavior: Clip.antiAlias,
+      child: imagePath.isNotEmpty
+          ? Image.file(File(imagePath), fit: BoxFit.cover)
+          : const Center(
+              child: Icon(Icons.image, color: Colors.white54, size: 48),
             ),
-          ),
-          const SizedBox(height: AppConstants.smallSpacing),
-          Text(
-            'Detected Bean Type',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey[600],
-            ),
-          ),
-        ],
-      ),
     );
   }
 
-  Widget _buildConfidenceBar() {
+  Widget _buildInfoCard() {
+    final DateTime now = DateTime.now();
+    final String dateStr = '${now.month}/${now.day}/${now.year} - ${now.hour}:${now.minute.toString().padLeft(2, '0')}';
+    final double healthyPct = (prediction.confidence * 100).clamp(0, 100);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(AppConstants.largePadding),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Colors.white.withOpacity(0.85),
         borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Confidence Level',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-              color: AppColors.textDarkGrey,
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(dateStr, style: const TextStyle(color: AppColors.textDarkGrey)),
+              const Icon(Icons.refresh, size: 18, color: AppColors.textDarkGrey),
+            ],
           ),
           const SizedBox(height: AppConstants.mediumSpacing),
-          LinearProgressIndicator(
-            value: prediction.confidence,
-            backgroundColor: Colors.grey[300],
-            valueColor: AlwaysStoppedAnimation<Color>(
-              prediction.confidence > 0.8 ? Colors.green : 
-              prediction.confidence > 0.6 ? Colors.orange : Colors.red,
-            ),
-            minHeight: 8,
-          ),
-          const SizedBox(height: AppConstants.smallSpacing),
-          Text(
-            '${(prediction.confidence * 100).toStringAsFixed(1)}%',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-              color: prediction.confidence > 0.8 ? Colors.green : 
-                     prediction.confidence > 0.6 ? Colors.orange : Colors.red,
-            ),
+          Text('Type: ${prediction.prediction}', style: const TextStyle(color: AppColors.textDarkGrey)),
+          const SizedBox(height: 4),
+          const Text('Mold: - | Bleached: -', style: TextStyle(color: AppColors.textDarkGrey)),
+          const SizedBox(height: 4),
+          const Text('Total Beans: -', style: TextStyle(color: AppColors.textDarkGrey)),
+          const SizedBox(height: AppConstants.mediumSpacing),
+          const Text('Estimated Shelf Life', style: TextStyle(fontWeight: FontWeight.w600, color: AppColors.textDarkGrey)),
+          const SizedBox(height: 2),
+          const Text('Confidence Score:', style: TextStyle(color: AppColors.textDarkGrey)),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              _circularScore(label: 'Confidence', percent: healthyPct, color: AppColors.primaryBrown),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _buildAllProbabilities() {
+  Widget _buildHealthTiles() {
+    final double healthy = (prediction.confidence * 100).clamp(0, 100);
+    final double defective = (100 - healthy).clamp(0, 100);
+    return Row(
+      children: [
+        Expanded(child: _healthCard('Healthy:', healthy, Colors.green)),
+        const SizedBox(width: AppConstants.mediumSpacing),
+        Expanded(child: _healthCard('Defective:', defective, AppColors.primaryBrown)),
+      ],
+    );
+  }
+
+  Widget _healthCard(String title, double percent, Color color) {
     return Container(
-      width: double.infinity,
       padding: const EdgeInsets.all(AppConstants.largePadding),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Colors.white.withOpacity(0.85),
         borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'All Bean Types',
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-              color: AppColors.textDarkGrey,
-            ),
-          ),
-          const SizedBox(height: AppConstants.mediumSpacing),
-          ...prediction.allProbabilities.entries.map((entry) {
-            final isTopPrediction = entry.key == prediction.prediction;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: AppConstants.smallSpacing),
-              child: Row(
-                children: [
-                  Expanded(
-                    flex: 2,
-                    child: Text(
-                      entry.key,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: isTopPrediction ? FontWeight.w600 : FontWeight.normal,
-                        color: isTopPrediction ? AppColors.primaryBrown : AppColors.textDarkGrey,
-                      ),
-                    ),
-                  ),
-                  Expanded(
-                    flex: 3,
-                    child: LinearProgressIndicator(
-                      value: entry.value,
-                      backgroundColor: Colors.grey[200],
-                      valueColor: AlwaysStoppedAnimation<Color>(
-                        isTopPrediction ? AppColors.primaryBrown : Colors.grey[400]!,
-                      ),
-                      minHeight: 6,
-                    ),
-                  ),
-                  const SizedBox(width: AppConstants.smallSpacing),
-                  SizedBox(
-                    width: 50,
-                    child: Text(
-                      '${(entry.value * 100).toStringAsFixed(1)}%',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: isTopPrediction ? FontWeight.w600 : FontWeight.normal,
-                        color: isTopPrediction ? AppColors.primaryBrown : Colors.grey[600],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }).toList(),
+          Text(title, style: const TextStyle(color: AppColors.textDarkGrey)),
+          const SizedBox(height: AppConstants.smallSpacing),
+          Center(child: _circularPercent(percent: percent, color: color)),
         ],
       ),
     );
   }
 
-  Widget _buildActionButtons(BuildContext context) {
+  Widget _circularPercent({required double percent, required Color color}) {
+    return SizedBox(
+      height: 90,
+      width: 90,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          CircularProgressIndicator(
+            value: percent / 100.0,
+            strokeWidth: 8,
+            backgroundColor: Colors.grey[200],
+            valueColor: AlwaysStoppedAnimation<Color>(color),
+          ),
+          Text('${percent.toStringAsFixed(0)}%', style: const TextStyle(fontWeight: FontWeight.w600)),
+        ],
+      ),
+    );
+  }
+
+  Widget _circularScore({required String label, required double percent, required Color color}) {
+    return Row(
+      children: [
+        _circularPercent(percent: percent, color: color),
+        const SizedBox(width: AppConstants.mediumSpacing),
+        Text(label, style: const TextStyle(color: AppColors.textDarkGrey)),
+      ],
+    );
+  }
+
+  Widget _buildYesNoButtons(BuildContext context) {
     return Row(
       children: [
         Expanded(
           child: ElevatedButton(
             onPressed: () => Navigator.of(context).pop(),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.grey[300],
-              foregroundColor: AppColors.textDarkGrey,
-              padding: const EdgeInsets.symmetric(vertical: AppConstants.mediumSpacing),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
-              ),
-            ),
-            child: const Text('Scan Again'),
-          ),
-        ),
-        const SizedBox(width: AppConstants.mediumSpacing),
-        Expanded(
-          child: ElevatedButton(
-            onPressed: () {
-              // TODO: Save to history
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Saved to history'),
-                  backgroundColor: Colors.green,
-                ),
-              );
-            },
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.primaryBrown,
               foregroundColor: Colors.white,
@@ -256,7 +183,22 @@ class ResultsPage extends StatelessWidget {
                 borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
               ),
             ),
-            child: const Text('Save Result'),
+            child: const Text('Yes'),
+          ),
+        ),
+        const SizedBox(width: AppConstants.mediumSpacing),
+        Expanded(
+          child: ElevatedButton(
+            onPressed: () => Navigator.of(context).maybePop(),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.grey[300],
+              foregroundColor: AppColors.textDarkGrey,
+              padding: const EdgeInsets.symmetric(vertical: AppConstants.mediumSpacing),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
+              ),
+            ),
+            child: const Text('No'),
           ),
         ),
       ],

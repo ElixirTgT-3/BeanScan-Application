@@ -544,25 +544,30 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     return Expanded(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: AppConstants.largePadding),
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border.all(
-              color: AppColors.primaryBrown,
-              width: AppConstants.mediumBorder,
-              style: BorderStyle.solid,
+        child: AspectRatio(
+          aspectRatio: 1.0, // Force a square viewfinder
+          child: Container(
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: AppColors.primaryBrown,
+                width: AppConstants.mediumBorder,
+                style: BorderStyle.solid,
+              ),
+              borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
             ),
-            borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
-            child: Stack(
-              children: [
-                _isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized
-                    ? CameraPreview(_cameraController!)
-                    : _buildCameraPlaceholder(),
-                if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
-                  _buildCornerBrackets(),
-              ],
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
+                    _buildSquareCameraPreview()
+                  else
+                    _buildCameraPlaceholder(),
+                  if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
+                    _buildCornerBrackets(),
+                ],
+              ),
             ),
           ),
         ),
@@ -601,6 +606,29 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
             ),
         ],
       ),
+    );
+  }
+
+  Widget _buildSquareCameraPreview() {
+    final previewSize = _cameraController!.value.previewSize;
+    if (previewSize == null) {
+      return CameraPreview(_cameraController!);
+    }
+
+    final double previewWidth = previewSize.width;
+    final double previewHeight = previewSize.height;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return FittedBox(
+          fit: BoxFit.cover, // Cover the square and crop excess
+          child: SizedBox(
+            width: previewWidth,
+            height: previewHeight,
+            child: CameraPreview(_cameraController!),
+          ),
+        );
+      },
     );
   }
 

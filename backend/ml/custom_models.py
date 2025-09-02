@@ -42,14 +42,14 @@ class BeanClassifierCNN(nn.Module):
         super().__init__()
         self.backbone = MobileNetV3Backbone(pretrained=pretrained)
         
-        # Classification head
+        # Classification head (increased dropout ~0.3 to mitigate overfitting)
         self.classifier = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
             nn.Linear(576, 256),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
+            nn.Dropout(0.3),
             nn.Linear(256, num_classes)
         )
         

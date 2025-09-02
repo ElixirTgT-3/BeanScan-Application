@@ -114,7 +114,7 @@ def main():
     print("=" * 60)
     
     # Configuration - Your extracted dataset paths
-    dataset_root = r"C:\Users\Raul\Downloads\Coffee Bean Object Detection.v1i.coco"
+    dataset_root = r"C:\Users\Raul\Downloads\Second Set Coffee Bean Object Detection.v1i.coco (1)"
     train_folder = os.path.join(dataset_root, "train")
     valid_folder = os.path.join(dataset_root, "valid")
     

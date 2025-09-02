@@ -28,7 +28,7 @@ class ApiService {
   static const String baseUrl = 'http://localhost:8000';
   
   // For Android device, use computer's actual IP address
-  static const String androidBaseUrl = 'http://192.168.1.7:8000';
+  static const String androidBaseUrl = 'http://192.168.1.9:8000';
   
   static String get apiUrl {
     // Check if running on Android emulator

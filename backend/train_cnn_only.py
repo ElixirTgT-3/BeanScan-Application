@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn.metrics import confusion_matrix, classification_report
 import seaborn as sns
+import shutil
+from datetime import datetime
 
 from ml.custom_models import BeanClassifierCNN
 
@@ -26,18 +28,37 @@ class BeanImageDataset(Dataset):
         # Load annotations
         self.annotations = self._load_annotations()
         
+        # Pre-compute class weights if training split (for imbalance handling)
+        self.class_weights = None
+        if split == 'train' and len(self.annotations) > 0:
+            bean_types = ["Arabica", "Robusta", "Liberica", "Excelsa"]
+            counts = {bt: 0 for bt in bean_types}
+            for ann in self.annotations:
+                if ann.get('bean_type') in counts:
+                    counts[ann['bean_type']] += 1
+            totals = sum(counts.values())
+            # Inverse frequency weights normalized
+            weights = []
+            for bt in bean_types:
+                freq = counts[bt] / totals if totals > 0 else 0
+                weights.append(0.0 if freq == 0 else 1.0 / freq)
+            # Normalize to mean 1.0 for stability
+            mean_w = sum(weights) / len(weights) if len(weights) > 0 else 1.0
+            self.class_weights = torch.tensor([w / mean_w for w in weights], dtype=torch.float32)
+        
         # Image transformations with strong augmentation for training
         if self.transform is None:
             if split == 'train':
                 # Strong augmentation for training
                 self.transform = transforms.Compose([
-                    transforms.Resize((256, 256)),  # Larger resize for random crop
-                    transforms.RandomCrop((224, 224)),  # Random crop
+                    # Stronger spatial augmentation
+                    transforms.RandomResizedCrop((224, 224), scale=(0.8, 1.0), ratio=(0.75, 1.33)),
                     transforms.RandomHorizontalFlip(p=0.5),  # Horizontal flip
                     transforms.RandomVerticalFlip(p=0.3),  # Vertical flip
                     transforms.RandomRotation(degrees=15),  # Rotation
                     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # Color jitter
                     transforms.RandomGrayscale(p=0.1),  # Random grayscale
+                    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.2),
                     transforms.ToTensor(),
                     transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                                        std=[0.229, 0.224, 0.225])
@@ -108,6 +129,7 @@ class CNNTrainer:
     
     def __init__(self, device: str = 'cpu', models_dir: str = './models'):
         self.device = torch.device(device)
+        self.non_blocking = self.device.type == 'cuda'
         self.models_dir = models_dir
         os.makedirs(models_dir, exist_ok=True)
         
@@ -115,18 +137,19 @@ class CNNTrainer:
         self.model = BeanClassifierCNN(num_classes=4).to(self.device)
         
         # Training parameters
-        self.learning_rate = 0.001
+        self.learning_rate = 0.0005
         self.batch_size = 16
-        self.num_epochs = 50
+        self.num_epochs = 40
         self.save_interval = 10
         
-        # Loss function and optimizer
+        # Loss function (optionally weighted if train dataset indicates imbalance)
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        # Weight decay (L2) to reduce overfitting (increased to 1e-3)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-3)
         
-        # Learning rate scheduler to prevent overfitting
+        # Learning rate scheduler (monitor validation loss – lower is better)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='max', factor=0.5, patience=5
+            self.optimizer, mode='min', factor=0.5, patience=5
         )
         
         # Training history
@@ -144,13 +167,26 @@ class CNNTrainer:
         total = 0
         
         for batch in tqdm(train_loader, desc='Training'):
-            images = batch['image'].to(self.device)
-            labels = batch['bean_type_label'].to(self.device)
+            images = batch['image'].to(self.device, non_blocking=self.non_blocking)
+            labels = batch['bean_type_label'].to(self.device, non_blocking=self.non_blocking)
+
+            # Mixup augmentation to improve robustness
+            lam = np.random.beta(0.4, 0.4) if np.random.rand() < 0.5 else 1.0
+            if lam < 1.0:
+                index = torch.randperm(images.size(0)).to(self.device)
+                mixed_images = lam * images + (1 - lam) * images[index, :]
+                labels_a, labels_b = labels, labels[index]
+            else:
+                mixed_images = images
+                labels_a, labels_b = labels, labels
             
             # Forward pass
             self.optimizer.zero_grad()
-            outputs = self.model(images)
-            loss = self.criterion(outputs, labels)
+            outputs = self.model(mixed_images)
+            if lam < 1.0:
+                loss = lam * self.criterion(outputs, labels_a) + (1 - lam) * self.criterion(outputs, labels_b)
+            else:
+                loss = self.criterion(outputs, labels)
             
             # Backward pass
             loss.backward()
@@ -179,8 +215,8 @@ class CNNTrainer:
         
         with torch.no_grad():
             for batch in tqdm(val_loader, desc='Validation'):
-                images = batch['image'].to(self.device)
-                labels = batch['bean_type_label'].to(self.device)
+                images = batch['image'].to(self.device, non_blocking=self.non_blocking)
+                labels = batch['bean_type_label'].to(self.device, non_blocking=self.non_blocking)
                 
                 # Forward pass
                 outputs = self.model(images)
@@ -208,8 +244,10 @@ class CNNTrainer:
         if val_loader:
             print(f"📊 Validating on {len(val_loader.dataset)} images")
         
-        best_val_acc = 0.0
-        patience = 10  # Early stopping patience
+        # Early stopping on validation loss
+        best_val_loss = float('inf')
+        patience = 15  # Early stopping patience (epochs without val loss improvement)
+        min_delta = 1e-4  # Minimum change to qualify as improvement
         patience_counter = 0
         
         for epoch in range(self.num_epochs):
@@ -250,20 +288,17 @@ class CNNTrainer:
                         support = class_report[bean_type]['support']
                         print(f"   {bean_type}: P={precision:.3f}, R={recall:.3f}, F1={f1:.3f} (n={support})")
                 
-                # Save best model and update scheduler
-                if val_acc > best_val_acc:
-                    best_val_acc = val_acc
-                    self.save_model('cnn_best.pth')
-                    print(f"💾 Saved best model with {val_acc:.2f}% accuracy")
-                
-                # Update learning rate scheduler
-                self.scheduler.step(val_acc)
-                
-                # Early stopping
-                if val_acc > best_val_acc:
+                # Save best model on lowest validation loss
+                if (best_val_loss - val_loss) > min_delta:
+                    best_val_loss = val_loss
                     patience_counter = 0
+                    self.save_model('cnn_best.pth')
+                    print(f"💾 Saved best model with Val Loss {val_loss:.4f} (Val Acc {val_acc:.2f}%)")
                 else:
                     patience_counter += 1
+
+                # Update learning rate scheduler with validation loss
+                self.scheduler.step(val_loss)
                 
                 if patience_counter >= patience:
                     print(f"🛑 Early stopping triggered after {epoch+1} epochs")
@@ -272,9 +307,16 @@ class CNNTrainer:
             # Save checkpoint periodically
             if (epoch + 1) % self.save_interval == 0:
                 self.save_model(f'cnn_epoch_{epoch+1}.pth')
+
+            # Save/update training history figure each epoch so it is always current
+            # Non-blocking save to disk; safe to stop training anytime and keep the latest figure
+            try:
+                self.plot_training_history(show=False)
+            except Exception:
+                pass
         
         print("\n🎉 CNN Training Complete!")
-        print(f"🏆 Best validation accuracy: {best_val_acc:.2f}%")
+        print(f"🏆 Best validation loss: {best_val_loss:.4f}")
         
         # Save final model
         self.save_model('cnn_final.pth')
@@ -287,8 +329,12 @@ class CNNTrainer:
         torch.save(self.model.state_dict(), save_path)
         print(f"💾 Saved model: {save_path}")
     
-    def plot_training_history(self):
-        """Plot training history with confusion matrix"""
+    def plot_training_history(self, show: bool = True):
+        """Plot training history with confusion matrix
+
+        Args:
+            show: If True, display the figure window. If False, just save to disk.
+        """
         fig, axes = plt.subplots(2, 2, figsize=(20, 12))
         
         # Loss plot
@@ -344,8 +390,35 @@ class CNNTrainer:
             axes[1, 1].grid(True)
         
         plt.tight_layout()
-        plt.savefig(os.path.join(self.models_dir, 'cnn_training_history.png'), dpi=300, bbox_inches='tight')
-        plt.show()
+        # Primary save inside models directory
+        primary_path = os.path.join(self.models_dir, 'cnn_training_history.png')
+        plt.savefig(primary_path, dpi=300, bbox_inches='tight')
+
+        # Also export a copy as "figure_1" into ./exports for easy access
+        try:
+            exports_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'exports'))
+            os.makedirs(exports_dir, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            figure1_path = os.path.join(exports_dir, 'figure_1.png')
+            figure1_ts_path = os.path.join(exports_dir, f'figure_1_{timestamp}.png')
+            shutil.copyfile(primary_path, figure1_path)
+            shutil.copyfile(primary_path, figure1_ts_path)
+            print(f"📁 Figure saved: {primary_path}")
+            print(f"📥 Auto-exported to: {figure1_path}")
+            print(f"🕒 Timestamped copy: {figure1_ts_path}")
+            # Auto-open on Windows for convenience
+            if os.name == 'nt':
+                try:
+                    os.startfile(figure1_path)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"⚠️ Could not export figure_1: {e}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
 
 def analyze_dataset_distribution(dataset, name):
     """Analyze class distribution in dataset"""
@@ -406,6 +479,23 @@ def main():
     # Initialize trainer
     trainer = CNNTrainer(device=device)
     
+    # Optionally set class-weighted loss to handle imbalance
+    try:
+        bean_types_order = ["Arabica", "Robusta", "Liberica", "Excelsa"]
+        counts_list = [train_dist.get(bt, 0) for bt in bean_types_order]
+        total_count = sum(counts_list)
+        inv_freq = []
+        for c in counts_list:
+            freq = (c / total_count) if total_count > 0 else 0.0
+            inv_freq.append(0.0 if freq == 0 else 1.0 / freq)
+        mean_w = sum(inv_freq) / len(inv_freq) if len(inv_freq) > 0 else 1.0
+        norm_weights = [(w / mean_w) for w in inv_freq]
+        class_weights_tensor = torch.tensor(norm_weights, dtype=torch.float32).to(device)
+        trainer.criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
+        print(f"⚖️ Using class weights: {norm_weights}")
+    except Exception as e:
+        print(f"⚠️ Could not set class weights: {e}")
+
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0)
