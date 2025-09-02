@@ -38,6 +38,12 @@ dependencies:
   # Camera functionality
   camera: ^0.10.5+9
   permission_handler: ^12.0.1
+  
+  # Image picker for gallery access
+  image_picker: ^1.0.7
+  
+  # HTTP client for API calls
+  http: ^1.1.0
 
 dev_dependencies:
   flutter_test:

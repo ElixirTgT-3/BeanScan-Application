@@ -11,22 +11,22 @@ import io
 class BeanClassifier(nn.Module):
     """CNN-based bean classifier using PyTorch"""
     
-    def __init__(self, num_classes: int = 5, pretrained: bool = True):
+    def __init__(self, num_classes: int = 4, pretrained: bool = True):
         super(BeanClassifier, self).__init__()
         
-        # Use ResNet18 as backbone (pretrained on ImageNet)
-        self.backbone = torch.hub.load('pytorch/vision:v0.10.0', 
-                                     'resnet18', pretrained=pretrained)
+        # Use our trained MobileNetV3 model
+        from ml.custom_models import BeanClassifierCNN
+        self.model = BeanClassifierCNN(num_classes=num_classes)
         
-        # Modify the final layer for our number of classes
-        num_features = self.backbone.fc.in_features
-        self.backbone.fc = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(num_features, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, num_classes)
-        )
+        # Load the trained weights if available
+        model_path = './models/cnn_best.pth'
+        if os.path.exists(model_path):
+            self.model.load_state_dict(torch.load(model_path, map_location='cpu'))
+            print(f"✅ Loaded trained model from {model_path}")
+        else:
+            print(f"⚠️  No trained model found at {model_path}, using untrained model")
+        
+        self.model.eval()
         
         # Image preprocessing
         self.transform = transforms.Compose([
@@ -43,23 +43,21 @@ class BeanClassifier(nn.Module):
             "Arabica",
             "Robusta", 
             "Liberica",
-            "Excelsa",
-            "Other"
+            "Excelsa"
         ]
         
-        # Set device (CPU/GPU)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.to(self.device)
+        # Set device (CPU for now)
+        self.device = torch.device("cpu")
         
     def forward(self, x):
-        return self.backbone(x)
+        return self.model(x)
     
     def predict(self, image_path: str) -> Dict[str, any]:
         """Predict bean type from image"""
         try:
             # Load and preprocess image
             image = Image.open(image_path).convert('RGB')
-            image_tensor = self.transform(image).unsqueeze(0).to(self.device)
+            image_tensor = self.transform(image).unsqueeze(0)
             
             # Set to evaluation mode
             self.eval()
@@ -90,7 +88,7 @@ class BeanClassifier(nn.Module):
         try:
             # Convert bytes to PIL Image
             image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-            image_tensor = self.transform(image).unsqueeze(0).to(self.device)
+            image_tensor = self.transform(image).unsqueeze(0)
             
             # Set to evaluation mode
             self.eval()

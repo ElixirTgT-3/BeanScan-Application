@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:image_picker/image_picker.dart';
+import 'dart:io';
 import '../utils/app_colors.dart';
 import '../utils/app_constants.dart';
+import '../utils/api_service.dart';
+import 'results_page.dart';
 
 class ScanPage extends StatefulWidget {
   const ScanPage({super.key});
@@ -177,18 +181,22 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
     try {
       final XFile image = await _cameraController!.takePicture();
-      // Here you can process the captured image
       debugPrint('Picture taken: ${image.path}');
       
-      // Show success message
+      // Show loading indicator
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Picture captured successfully!'),
-            backgroundColor: Colors.green,
+            content: Text('Analyzing image...'),
+            backgroundColor: Colors.blue,
+            duration: Duration(seconds: 2),
           ),
         );
       }
+      
+      // Process the image with API
+      await _processImage(File(image.path));
+      
     } catch (e) {
       debugPrint('Error taking picture: $e');
       if (mounted) {
@@ -224,6 +232,106 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       });
     } catch (e) {
       debugPrint('Error toggling flash: $e');
+    }
+  }
+
+  Future<void> _processImage(File imageFile) async {
+    try {
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return const AlertDialog(
+            content: Row(
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(width: 20),
+                Text("Analyzing bean type..."),
+              ],
+            ),
+          );
+        },
+      );
+
+      // Make API call
+      final result = await ApiService.predictBeanTypeWithErrorHandling(imageFile);
+      
+      // Hide loading dialog
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+
+      if (result['success'] && result['prediction'] != null) {
+        // Navigate to results page
+        if (mounted) {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (context) => ResultsPage(
+                prediction: result['prediction'],
+                imagePath: imageFile.path,
+              ),
+            ),
+          );
+        }
+      } else {
+        // Show error message
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(result['error'] ?? 'Failed to analyze image'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      // Hide loading dialog
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _pickImageFromGallery() async {
+    try {
+      final ImagePicker picker = ImagePicker();
+      final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+      
+      if (image != null) {
+        // Show loading indicator
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Analyzing image...'),
+              backgroundColor: Colors.blue,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        
+        // Process the image with API
+        await _processImage(File(image.path));
+      }
+    } catch (e) {
+      debugPrint('Error picking image: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error picking image: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -410,7 +518,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       child: Column(
         children: [
           Text(
-            "Scan Coffee Beans",
+            "Bean Type Scanner",
             style: TextStyle(
               fontSize: 24,
               fontWeight: FontWeight.bold,
@@ -420,7 +528,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           ),
           SizedBox(height: AppConstants.smallSpacing),
           Text(
-            "Point your camera at the coffee beans to scan for molds or defects.",
+            "Point your camera at coffee beans to identify their type (Arabica, Robusta, Liberica, Excelsa).",
             style: TextStyle(
               fontSize: 14,
               color: Colors.white70,
@@ -567,31 +675,34 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   Widget _buildUploadButton() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AppConstants.largePadding),
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: AppConstants.mediumSpacing, horizontal: AppConstants.largePadding),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(AppConstants.extraLargeRadius),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Text(
-              "Upload From Gallery",
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                color: AppColors.textDarkGrey,
+      child: GestureDetector(
+        onTap: _pickImageFromGallery,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(vertical: AppConstants.mediumSpacing, horizontal: AppConstants.largePadding),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(AppConstants.extraLargeRadius),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Text(
+                "Upload From Gallery",
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.textDarkGrey,
+                ),
               ),
-            ),
-            const SizedBox(width: AppConstants.smallSpacing),
-            Icon(
-              Icons.upload,
-              color: AppColors.textDarkGrey,
-              size: AppConstants.smallIconSize,
-            ),
-          ],
+              const SizedBox(width: AppConstants.smallSpacing),
+              Icon(
+                Icons.upload,
+                color: AppColors.textDarkGrey,
+                size: AppConstants.smallIconSize,
+              ),
+            ],
+          ),
         ),
       ),
     );

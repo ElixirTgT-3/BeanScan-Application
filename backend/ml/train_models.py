@@ -52,7 +52,7 @@ class BeanImageDataset(Dataset):
     def _create_dummy_annotations(self):
         """Create dummy annotations for testing"""
         annotations = []
-        bean_types = ["Arabica", "Robusta", "Liberica", "Excelsa", "Other"]
+        bean_types = ["Arabica", "Robusta", "Liberica", "Excelsa"]
         
         # Create dummy data
         for i in range(100):
@@ -104,7 +104,7 @@ class BeanImageDataset(Dataset):
     
     def _get_bean_type_label(self, bean_type: str):
         """Convert bean type to label index"""
-        bean_types = ["Arabica", "Robusta", "Liberica", "Excelsa", "Other"]
+        bean_types = ["Arabica", "Robusta", "Liberica", "Excelsa"]
         return bean_types.index(bean_type) if bean_type in bean_types else 0
     
     def _get_defect_labels(self, defects: List):

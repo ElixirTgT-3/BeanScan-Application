@@ -38,7 +38,7 @@ class MobileNetV3Backbone(nn.Module):
 class BeanClassifierCNN(nn.Module):
     """CNN for bean type classification using MobileNetV3 backbone"""
     
-    def __init__(self, num_classes: int = 5, pretrained: bool = True):
+    def __init__(self, num_classes: int = 4, pretrained: bool = True):
         super().__init__()
         self.backbone = MobileNetV3Backbone(pretrained=pretrained)
         
@@ -54,7 +54,7 @@ class BeanClassifierCNN(nn.Module):
         )
         
         # Bean type names
-        self.class_names = ["Arabica", "Robusta", "Liberica", "Excelsa", "Other"]
+        self.class_names = ["Arabica", "Robusta", "Liberica", "Excelsa"]
         
     def forward(self, x):
         features = self.backbone(x)
@@ -369,7 +369,7 @@ def create_models(device: str = 'cpu'):
     device = torch.device(device)
     
     # Initialize models
-    cnn = BeanClassifierCNN(num_classes=5, pretrained=True)
+    cnn = BeanClassifierCNN(num_classes=4, pretrained=True)
     defect_detector = DefectDetectorMaskRCNN(num_classes=4, pretrained=True)
     lstm = ShelfLifeLSTM(input_size=64, hidden_size=128, num_layers=2)
     
