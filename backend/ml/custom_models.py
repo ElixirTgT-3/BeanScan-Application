@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import mobilenet_v3_small, mobilenet_v3_large
 from torchvision.models.detection import maskrcnn_resnet50_fpn
+from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn
 from torchvision.models.detection.backbone_utils import BackboneWithFPN
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
@@ -169,6 +170,51 @@ class DefectDetectorMaskRCNN(nn.Module):
                         defects.append(defect)
             
             return defects
+
+class DefectDetectorFasterRCNN(nn.Module):
+    """Faster R-CNN detector (bounding boxes only) for bean defects"""
+    
+    def __init__(self, num_classes: int = 7, pretrained: bool = True,
+                 class_names: Optional[List[str]] = None):
+        super().__init__()
+        # num_classes should include background (>=2)
+        self.num_classes = max(2, num_classes)
+        self.model = fasterrcnn_mobilenet_v3_large_fpn(pretrained=pretrained)
+        in_features = self.model.roi_heads.box_predictor.cls_score.in_features
+        self.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, self.num_classes)
+        
+        default_classes = [
+            "insect_damage",
+            "nugget",
+            "quaker",
+            "roasted-beans",
+            "shell",
+            "under_roast"
+        ]
+        self.class_names = ["__background__"] + (class_names or default_classes)
+    
+    def forward(self, images, targets=None):
+        return self.model(images, targets)
+    
+    def detect(self, image, confidence_threshold: float = 0.5):
+        self.eval()
+        with torch.no_grad():
+            if len(image.shape) == 3:
+                image = image.unsqueeze(0)
+            outputs = self.forward(image)
+            detections = []
+            for pred in outputs:
+                boxes = pred['boxes']
+                scores = pred['scores']
+                labels = pred['labels']
+                for i in range(len(scores)):
+                    if scores[i] >= confidence_threshold:
+                        detections.append({
+                            'bbox': boxes[i].tolist(),
+                            'score': scores[i].item(),
+                            'label': self.class_names[labels[i].item()]
+                        })
+            return detections
 
 class ShelfLifeLSTM(nn.Module):
     """LSTM for shelf life prediction based on defect progression"""

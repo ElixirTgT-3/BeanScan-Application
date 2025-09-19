@@ -244,31 +244,60 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         builder: (BuildContext context) {
           return const AlertDialog(
             content: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
                 CircularProgressIndicator(),
                 SizedBox(width: 20),
-                Text("Analyzing bean type..."),
+                Expanded(
+                  child: Text("Analyzing bean type and detecting defects..."),
+                ),
               ],
             ),
           );
         },
       );
 
-      // Make API call
-      final result = await ApiService.predictBeanTypeWithErrorHandling(imageFile);
+      // Test the API connection first
+      final testResult = await ApiService.testScanEndpoint(imageFile);
+      if (!testResult['success']) {
+        if (mounted) {
+          Navigator.of(context).pop();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Test failed: ${testResult['error']}'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+      
+      // Make API call for both classification and defect detection
+      final result = await ApiService.scanBeanImage(imageFile);
       
       // Hide loading dialog
       if (mounted) {
         Navigator.of(context).pop();
       }
 
-      if (result['success'] && result['prediction'] != null) {
-        // Navigate to results page
+      if (result['success'] && result['data'] != null) {
+        // Convert the prediction data to BeanPrediction object
+        final predictionData = result['data']['prediction'];
+        final beanPrediction = BeanPrediction(
+          prediction: predictionData['predicted_class'] ?? '',
+          confidence: (predictionData['confidence'] ?? 0.0).toDouble(),
+          allProbabilities: Map<String, double>.from(
+            predictionData['all_probabilities'] ?? {},
+          ),
+        );
+        
+        // Navigate to results page with both classification and defect detection
         if (mounted) {
           Navigator.of(context).push(
             MaterialPageRoute(
               builder: (context) => ResultsPage(
-                prediction: result['prediction'],
+                prediction: beanPrediction,
+                defectDetection: result['data']['defect_detection'],
                 imagePath: imageFile.path,
               ),
             ),
@@ -518,7 +547,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       child: Column(
         children: [
           Text(
-            "Bean Type Scanner",
+            "Bean Scanner & Defect Detector",
             style: TextStyle(
               fontSize: 24,
               fontWeight: FontWeight.bold,
@@ -528,7 +557,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           ),
           SizedBox(height: AppConstants.smallSpacing),
           Text(
-            "Point your camera at coffee beans to identify their type (Arabica, Robusta, Liberica, Excelsa).",
+            "Point your camera at coffee beans to identify their type and detect defects (insect damage, quaker, shell, etc.).",
             style: TextStyle(
               fontSize: 14,
               color: Colors.white70,
