@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import mobilenet_v3_small, mobilenet_v3_large
 from torchvision.models.detection import maskrcnn_resnet50_fpn
-from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn
+from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn, FasterRCNN_MobileNet_V3_Large_FPN_Weights
 from torchvision.models.detection.backbone_utils import BackboneWithFPN
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 
 class MobileNetV3Backbone(nn.Module):
-    """Custom MobileNetV3 backbone for feature extraction"""
+    """Custom MobileNetV3 backbone for feature extraction - matches trained model architecture"""
     
     def __init__(self, pretrained: bool = True, width_mult: float = 1.0):
         super().__init__()
@@ -60,7 +60,7 @@ class BeanClassifierCNN(nn.Module):
     def forward(self, x):
         features = self.backbone(x)
         # Use the last feature map for classification
-        x = features[-1]
+        x = features[-1]  # Last feature layer
         x = self.classifier(x)
         return x
     
@@ -93,73 +93,60 @@ class BeanClassifierCNN(nn.Module):
             return predictions
 
 class DefectDetectorMaskRCNN(nn.Module):
-    """Mask R-CNN for defect detection using MobileNetV3 backbone"""
+    """Faster R-CNN for defect detection using MobileNetV3 - matches trained model architecture"""
     
-    def __init__(self, num_classes: int = 4, pretrained: bool = True):
+    def __init__(self, num_classes: int = 6, pretrained: bool = True):
         super().__init__()
-        # Create custom backbone with MobileNetV3
-        self.backbone = MobileNetV3Backbone(pretrained=pretrained)
         
-        # Create FPN from backbone features
-        self.fpn = BackboneWithFPN(
-            self.backbone,
-            return_layers={'0': '0', '1': '1', '2': '2', '3': '3', '4': '4', '5': '5'},
-            in_channels_list=[16, 24, 40, 48, 96, 576],
-            out_channels=256
-        )
+        # Use MobileNetV3 backbone with FPN (matches your trained model)
+        weights = FasterRCNN_MobileNet_V3_Large_FPN_Weights.COCO_V1 if pretrained else None
+        self.model = fasterrcnn_mobilenet_v3_large_fpn(weights=weights)
         
-        # Create Mask R-CNN with custom backbone
-        self.mask_rcnn = maskrcnn_resnet50_fpn(
-            pretrained=False,
-            num_classes=num_classes + 1  # +1 for background
-        )
+        # Customize box predictor for defect classes
+        in_features = self.model.roi_heads.box_predictor.cls_score.in_features
+        self.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes + 1)  # +1 for background
         
-        # Replace backbone
-        self.mask_rcnn.backbone = self.fpn
-        
-        # Customize box and mask predictors
-        in_features = self.mask_rcnn.roi_heads.box_predictor.cls_score.in_features
-        self.mask_rcnn.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes + 1)
-        
-        in_features_mask = self.mask_rcnn.roi_heads.mask_predictor.conv5_mask.in_channels
-        hidden_layer = 256
-        self.mask_rcnn.roi_heads.mask_predictor = MaskRCNNPredictor(
-            in_features_mask, hidden_layer, num_classes + 1
-        )
-        
-        # Defect types
-        self.defect_types = ["Mold", "Insect_Damage", "Discoloration", "Physical_Damage"]
+        # Defect types (matching your training data)
+        self.defect_types = ["insect_damage", "nugget", "quaker", "roasted-beans", "shell", "under_roast"]
         
     def forward(self, images, targets=None):
-        return self.mask_rcnn(images, targets)
+        return self.model(images, targets)
     
     def detect_defects(self, image, confidence_threshold: float = 0.5):
         """Detect defects in bean image"""
         self.eval()
         with torch.no_grad():
-            # Prepare image
-            if len(image.shape) == 3:
-                image = image.unsqueeze(0)
+            # Prepare image - Faster R-CNN expects a list of images
+            if len(image.shape) == 4:  # Already batched
+                image_list = [image.squeeze(0)]  # Convert to list
+            elif len(image.shape) == 3:  # Single image
+                image_list = [image]  # Convert to list
+            else:
+                raise ValueError(f"Unexpected image shape: {image.shape}")
             
             # Get predictions
-            predictions = self.forward(image)
+            predictions = self.forward(image_list)
             
             # Process results
             defects = []
             for pred in predictions:
                 boxes = pred['boxes']
                 scores = pred['scores']
-                masks = pred['masks']
                 labels = pred['labels']
                 
+                # Faster R-CNN doesn't have masks, so we'll calculate area from bounding box
                 for i in range(len(scores)):
                     if scores[i] >= confidence_threshold:
+                        # Calculate area from bounding box (width * height)
+                        x1, y1, x2, y2 = boxes[i]
+                        area = (x2 - x1) * (y2 - y1)
+                        
                         defect = {
                             'bbox': boxes[i].tolist(),
                             'confidence': scores[i].item(),
-                            'mask': masks[i].squeeze().tolist(),
+                            'mask': None,  # No masks in Faster R-CNN
                             'defect_type': self.defect_types[labels[i].item() - 1],  # -1 for background
-                            'area': torch.sum(masks[i]).item(),
+                            'area': area.item(),
                             'coordinates': {
                                 'x1': boxes[i][0].item(),
                                 'y1': boxes[i][1].item(),
@@ -216,124 +203,140 @@ class DefectDetectorFasterRCNN(nn.Module):
                         })
             return detections
 
-class ShelfLifeLSTM(nn.Module):
-    """LSTM for shelf life prediction based on defect progression"""
+class RuleBasedShelfLife:
+    """Rule-based shelf life prediction based on defect analysis"""
     
-    def __init__(self, input_size: int = 64, hidden_size: int = 128, num_layers: int = 2, dropout: float = 0.2):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
+    def __init__(self):
+        # Defect severity weights (higher = more critical)
+        self.defect_weights = {
+            'mold': 10.0,
+            'insect_damage': 8.0,
+            'discoloration': 6.0,
+            'physical_damage': 4.0,
+            'quaker': 7.0,
+            'shell': 3.0,
+            'under_roast': 2.0,
+            'roasted-beans': 1.0,
+            'nugget': 5.0
+        }
         
-        # LSTM layers
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            dropout=dropout if num_layers > 1 else 0,
-            batch_first=True,
-            bidirectional=True
-        )
-        
-        # Attention mechanism
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_size * 2,  # *2 for bidirectional
-            num_heads=8,
-            dropout=dropout
-        )
-        
-        # Prediction head
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_size * 2, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, 1)  # Predict days until expiration
-        )
+        # Base shelf life by bean type (in days)
+        self.base_shelf_life = {
+            'Arabica': 30,
+            'Robusta': 25,
+            'Liberica': 28,
+            'Excelsa': 26,
+            'Other': 20
+        }
         
         # Shelf life categories
         self.shelf_life_categories = ["Expired", "Critical", "Warning", "Good", "Excellent"]
-        
-    def forward(self, x, hidden=None):
-        # x shape: (batch_size, seq_len, input_size)
-        batch_size = x.size(0)
-        
-        # Initialize hidden state if not provided
-        if hidden is None:
-            h0 = torch.zeros(self.num_layers * 2, batch_size, self.hidden_size).to(x.device)
-            c0 = torch.zeros(self.num_layers * 2, batch_size, self.hidden_size).to(x.device)
-            hidden = (h0, c0)
-        
-        # LSTM forward pass
-        lstm_out, hidden = self.lstm(x, hidden)
-        
-        # Apply attention
-        lstm_out = lstm_out.transpose(0, 1)  # (seq_len, batch_size, hidden_size*2)
-        attn_out, _ = self.attention(lstm_out, lstm_out, lstm_out)
-        attn_out = attn_out.transpose(0, 1)  # (batch_size, seq_len, hidden_size*2)
-        
-        # Global average pooling
-        pooled = torch.mean(attn_out, dim=1)  # (batch_size, hidden_size*2)
-        
-        # Predict shelf life
-        shelf_life = self.classifier(pooled)
-        
-        return shelf_life, hidden
     
-    def predict_shelf_life(self, defect_sequence, confidence_threshold: float = 0.7):
-        """Predict shelf life based on defect progression sequence"""
-        self.eval()
-        with torch.no_grad():
-            # Prepare input sequence
-            if isinstance(defect_sequence, list):
-                defect_sequence = torch.tensor(defect_sequence, dtype=torch.float32)
-            
-            if len(defect_sequence.shape) == 2:
-                defect_sequence = defect_sequence.unsqueeze(0)  # Add batch dimension
-            
-            # Get prediction
-            shelf_life_days, _ = self.forward(defect_sequence)
-            predicted_days = shelf_life_days.item()
-            
-            # Categorize shelf life
-            if predicted_days <= 0:
-                category = "Expired"
-                confidence = 1.0
-            elif predicted_days <= 3:
-                category = "Critical"
-                confidence = 0.9
-            elif predicted_days <= 7:
-                category = "Warning"
-                confidence = 0.8
-            elif predicted_days <= 14:
-                category = "Good"
-                confidence = 0.7
+    def predict_shelf_life(self, defect_sequence, bean_type='Arabica', confidence_threshold: float = 0.7):
+        """Predict shelf life based on defect analysis using rule-based approach"""
+        
+        # Handle different input formats
+        if isinstance(defect_sequence, list):
+            defects = defect_sequence
+        elif hasattr(defect_sequence, 'tolist'):
+            defects = defect_sequence.tolist()
+        else:
+            defects = []
+        
+        # Start with base shelf life for the bean type
+        base_days = self.base_shelf_life.get(bean_type, 20)
+        predicted_days = base_days
+        
+        # Calculate defect impact
+        total_defect_score = 0
+        defect_counts = {}
+        
+        # Count and score defects
+        for defect in defects:
+            if isinstance(defect, dict):
+                defect_type = defect.get('type', 'unknown')
+                confidence = defect.get('confidence', 0.5)
+                count = defect.get('count', 1)
             else:
-                category = "Excellent"
-                confidence = 0.6
+                # Handle simple defect type strings
+                defect_type = str(defect).lower()
+                confidence = 1.0
+                count = 1
             
-            # Adjust confidence based on threshold
-            if confidence < confidence_threshold:
-                category = "Uncertain"
+            # Get defect weight
+            weight = self.defect_weights.get(defect_type, 1.0)
             
-            return {
-                'predicted_days': max(0, int(predicted_days)),
-                'category': category,
-                'confidence': confidence,
-                'raw_prediction': predicted_days
-            }
+            # Calculate impact (weight * confidence * count)
+            impact = weight * confidence * count
+            total_defect_score += impact
+            
+            # Track defect counts
+            defect_counts[defect_type] = defect_counts.get(defect_type, 0) + count
+        
+        # Apply defect penalties to shelf life
+        if total_defect_score > 0:
+            # Exponential decay based on defect score
+            penalty_factor = min(0.9, total_defect_score / 50.0)  # Cap at 90% reduction
+            predicted_days = base_days * (1 - penalty_factor)
+        
+        # Apply specific rules for critical defects
+        if 'mold' in defect_counts and defect_counts['mold'] > 0:
+            predicted_days = min(predicted_days, 2)  # Mold = immediate concern
+        
+        if 'insect_damage' in defect_counts and defect_counts['insect_damage'] > 2:
+            predicted_days = min(predicted_days, 5)  # Heavy insect damage = critical
+        
+        # Ensure minimum shelf life
+        predicted_days = max(0, predicted_days)
+        
+        # Categorize shelf life
+        if predicted_days <= 0:
+            category = "Expired"
+            confidence = 0.95
+        elif predicted_days <= 3:
+            category = "Critical"
+            confidence = 0.9
+        elif predicted_days <= 7:
+            category = "Warning"
+            confidence = 0.8
+        elif predicted_days <= 14:
+            category = "Good"
+            confidence = 0.75
+        else:
+            category = "Excellent"
+            confidence = 0.7
+        
+        # Adjust confidence based on defect diversity and severity
+        if len(defect_counts) > 3:  # Multiple defect types
+            confidence *= 0.9
+        if total_defect_score > 20:  # High severity
+            confidence *= 0.85
+        
+        # Adjust confidence based on threshold
+        if confidence < confidence_threshold:
+            category = "Uncertain"
+            confidence = confidence_threshold - 0.1
+        
+        return {
+            'predicted_days': max(0, int(predicted_days)),
+            'category': category,
+            'confidence': min(0.95, confidence),
+            'raw_prediction': predicted_days,
+            'defect_score': total_defect_score,
+            'defect_counts': defect_counts,
+            'base_shelf_life': base_days
+        }
 
 class BeanScanEnsemble(nn.Module):
-    """Ensemble model combining CNN, Mask R-CNN, and LSTM"""
+    """Ensemble model combining CNN, Mask R-CNN, and Rule-based Shelf Life"""
     
     def __init__(self, cnn_model: BeanClassifierCNN, 
                  defect_model: DefectDetectorMaskRCNN,
-                 lstm_model: ShelfLifeLSTM):
+                 shelf_life_model: RuleBasedShelfLife):
         super().__init__()
         self.cnn_model = cnn_model
         self.defect_model = defect_model
-        self.lstm_model = lstm_model
+        self.shelf_life_model = shelf_life_model
         
     def forward(self, image, defect_sequence=None):
         """Complete bean analysis pipeline"""
@@ -349,7 +352,9 @@ class BeanScanEnsemble(nn.Module):
         
         # 3. Shelf life prediction (if sequence provided)
         if defect_sequence is not None:
-            shelf_life = self.lstm_model.predict_shelf_life(defect_sequence)
+            # Get bean type for rule-based prediction
+            bean_type = results.get('bean_classification', [{}])[0].get('class', 'Arabica') if results.get('bean_classification') else 'Arabica'
+            shelf_life = self.shelf_life_model.predict_shelf_life(defect_sequence, bean_type)
             results['shelf_life_prediction'] = shelf_life
         
         # 4. Calculate overall health score
@@ -416,24 +421,29 @@ def create_models(device: str = 'cpu'):
     
     # Initialize models
     cnn = BeanClassifierCNN(num_classes=4, pretrained=True)
-    defect_detector = DefectDetectorMaskRCNN(num_classes=4, pretrained=True)
-    lstm = ShelfLifeLSTM(input_size=64, hidden_size=128, num_layers=2)
+    defect_detector = DefectDetectorMaskRCNN(num_classes=6, pretrained=True)
+    shelf_life_model = RuleBasedShelfLife()  # Rule-based instead of LSTM
     
-    # Move to device
+    # Move to device (rule-based model doesn't need device)
     cnn.to(device)
     defect_detector.to(device)
-    lstm.to(device)
     
     # Create ensemble
-    ensemble = BeanScanEnsemble(cnn, defect_detector, lstm)
+    ensemble = BeanScanEnsemble(cnn, defect_detector, shelf_life_model)
     ensemble.to(device)
     
-    return {
+    # Load trained weights if available
+    models = {
         'cnn': cnn,
         'defect_detector': defect_detector,
-        'lstm': lstm,
+        'shelf_life_model': shelf_life_model,  # Updated key name
         'ensemble': ensemble
     }
+    
+    # Load saved weights
+    load_models(device=device, models=models)
+    
+    return models
 
 def save_models(models: Dict, save_dir: str = './models'):
     """Save all models"""
@@ -441,23 +451,49 @@ def save_models(models: Dict, save_dir: str = './models'):
     os.makedirs(save_dir, exist_ok=True)
     
     for name, model in models.items():
+        # Skip saving rule-based model (no state to save)
+        if name == 'shelf_life_model':
+            print(f"✅ Rule-based {name} model (no state to save)")
+            continue
+        
         torch.save(model.state_dict(), os.path.join(save_dir, f'{name}.pth'))
         print(f"✅ Saved {name} model")
 
-def load_models(device: str = 'cpu', model_dir: str = './models'):
+def load_models(device: str = 'cpu', models: Dict = None, model_dir: str = './models'):
     """Load all models"""
+    import os
     device = torch.device(device)
     
-    # Create models
-    models = create_models(device)
+    if models is None:
+        # This should not happen in our current usage
+        print("⚠️  No models provided to load_models")
+        return {}
     
     # Load saved weights if available
     for name, model in models.items():
-        model_path = os.path.join(model_dir, f'{name}.pth')
+        # Skip loading rule-based model (no state to load)
+        if name == 'shelf_life_model':
+            print(f"✅ Rule-based {name} model (no state to load)")
+            continue
+        
+        # Map model names to actual file names
+        model_file_map = {
+            'cnn': 'cnn_best.pth',
+            'defect_detector': 'best_model.pth',  # Use best_model.pth for defect detection
+            'ensemble': 'cnn_final.pth'  # Use cnn_final.pth for ensemble (or skip if not available)
+        }
+        
+        model_filename = model_file_map.get(name, f'{name}.pth')
+        model_path = os.path.join(model_dir, model_filename)
+        
         if os.path.exists(model_path):
-            model.load_state_dict(torch.load(model_path, map_location=device))
-            print(f"✅ Loaded {name} model from {model_path}")
+            try:
+                model.load_state_dict(torch.load(model_path, map_location=device))
+                print(f"✅ Loaded {name} model from {model_path}")
+            except RuntimeError as e:
+                print(f"⚠️  Architecture mismatch for {name} model: {str(e)[:100]}...")
+                print(f"⚠️  Using initialized weights for {name} (trained model has different architecture)")
         else:
-            print(f"⚠️  No saved weights found for {name}, using initialized weights")
+            print(f"⚠️  No saved weights found for {name} ({model_filename}), using initialized weights")
     
     return models

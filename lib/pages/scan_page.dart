@@ -258,13 +258,13 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       );
 
       // Test the API connection first
-      final testResult = await ApiService.testScanEndpoint(imageFile);
+      final testResult = await ApiService.scanBeanImage(imageFile);
       if (!testResult['success']) {
         if (mounted) {
           Navigator.of(context).pop();
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Test failed: ${testResult['error']}'),
+              content: Text('Scan failed: ${testResult['error']}'),
               backgroundColor: Colors.red,
             ),
           );
@@ -272,43 +272,63 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         return;
       }
       
-      // Make API call for both classification and defect detection
-      final result = await ApiService.scanBeanImage(imageFile);
-      
       // Hide loading dialog
       if (mounted) {
         Navigator.of(context).pop();
       }
 
-      if (result['success'] && result['data'] != null) {
+      if (testResult['success'] && testResult['data'] != null) {
+        // Debug: Print the full API response
+        print('🔍 API Response Debug:');
+        print('  - testResult: $testResult');
+        print('  - data: ${testResult['data']}');
+        
         // Convert the prediction data to BeanPrediction object
-        final predictionData = result['data']['prediction'];
+        final predictionData = testResult['data']['data']['prediction'];
+        print('  - predictionData: $predictionData');
+        
+        // Convert all_probabilities from list to map
+        final probabilitiesList = predictionData['all_probabilities'] as List<dynamic>? ?? [];
+        final beanTypes = ['Arabica', 'Robusta', 'Liberica', 'Excelsa'];
+        final allProbabilities = <String, double>{};
+        
+        for (int i = 0; i < probabilitiesList.length && i < beanTypes.length; i++) {
+          allProbabilities[beanTypes[i]] = (probabilitiesList[i] as num).toDouble();
+        }
+        
         final beanPrediction = BeanPrediction(
           prediction: predictionData['predicted_class'] ?? '',
           confidence: (predictionData['confidence'] ?? 0.0).toDouble(),
-          allProbabilities: Map<String, double>.from(
-            predictionData['all_probabilities'] ?? {},
-          ),
+          allProbabilities: allProbabilities,
         );
         
+        print('  - beanPrediction: $beanPrediction');
+        
         // Navigate to results page with both classification and defect detection
+        print('🚀 About to navigate to ResultsPage...');
         if (mounted) {
+          print('🚀 Navigating to ResultsPage...');
           Navigator.of(context).push(
             MaterialPageRoute(
               builder: (context) => ResultsPage(
                 prediction: beanPrediction,
-                defectDetection: result['data']['defect_detection'],
+                defectDetection: testResult['data']['data']['defect_detection'],
+                shelfLife: testResult['data']['data']['shelf_life'],
+                beanCount: testResult['data']['data']['bean_count'],
                 imagePath: imageFile.path,
               ),
             ),
           );
+          print('🚀 Navigation completed!');
+        } else {
+          print('❌ Widget not mounted, cannot navigate');
         }
       } else {
         // Show error message
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(result['error'] ?? 'Failed to analyze image'),
+              content: Text(testResult['error'] ?? 'Failed to analyze image'),
               backgroundColor: Colors.red,
             ),
           );

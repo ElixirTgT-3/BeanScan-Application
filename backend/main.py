@@ -6,7 +6,7 @@ import os
 from dotenv import load_dotenv
 
 # Import our modules
-from api import scan_routes, history_routes
+from api import scan_routes_custom, history_routes
 from database.supabase_client import get_supabase_client
 from ml.bean_classifier import BeanClassifier
 
@@ -30,7 +30,7 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(scan_routes.router, prefix="/api/v1", tags=["scan"])
+app.include_router(scan_routes_custom.router, prefix="/api/v1", tags=["scan"])
 app.include_router(history_routes.router, prefix="/api/v1", tags=["history"])
 
 @app.get("/")

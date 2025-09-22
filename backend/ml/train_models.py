@@ -14,7 +14,7 @@ from tqdm import tqdm
 from custom_models import (
     BeanClassifierCNN, 
     DefectDetectorMaskRCNN, 
-    ShelfLifeLSTM,
+    RuleBasedShelfLife,
     BeanScanEnsemble,
     create_models
 )
@@ -150,8 +150,7 @@ class ModelTrainer:
         # Training history
         self.training_history = {
             'cnn_loss': [], 'cnn_acc': [],
-            'defect_loss': [], 'defect_map': [],
-            'lstm_loss': [], 'lstm_mae': []
+            'defect_loss': [], 'defect_map': []
         }
     
     def _get_defect_loss(self):
@@ -166,8 +165,7 @@ class ModelTrainer:
         """Create optimizers for all models"""
         return {
             'cnn': optim.Adam(self.models['cnn'].parameters(), lr=self.learning_rate),
-            'defect_detector': optim.Adam(self.models['defect_detector'].parameters(), lr=self.learning_rate),
-            'lstm': optim.Adam(self.models['lstm'].parameters(), lr=self.learning_rate)
+            'defect_detector': optim.Adam(self.models['defect_detector'].parameters(), lr=self.learning_rate)
         }
     
     def train_cnn(self, train_loader: DataLoader, val_loader: DataLoader = None):
@@ -265,57 +263,11 @@ class ModelTrainer:
         print("✅ Defect Detector Training Complete!")
         return self.training_history['defect_loss']
     
-    def train_lstm(self, train_loader: DataLoader, val_loader: DataLoader = None):
-        """Train the LSTM for shelf life prediction"""
-        print("🚀 Training LSTM...")
-        
-        model = self.models['lstm']
-        optimizer = self.optimizers['lstm']
-        model.train()
-        
-        for epoch in range(self.num_epochs):
-            running_loss = 0.0
-            running_mae = 0.0
-            
-            # Training loop
-            for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}/{self.num_epochs}'):
-                # Create dummy sequence data for training
-                seq_length = 10
-                batch_size = batch['image'].size(0)
-                
-                # Generate dummy defect sequences
-                sequences = torch.randn(batch_size, seq_length, 64).to(self.device)
-                targets = torch.tensor([batch['health_score'] * 30 for _ in range(batch_size)], 
-                                     dtype=torch.float32).to(self.device)  # Convert to days
-                
-                # Forward pass
-                optimizer.zero_grad()
-                outputs, _ = model(sequences)
-                loss = nn.MSELoss()(outputs.squeeze(), targets)
-                
-                # Backward pass
-                loss.backward()
-                optimizer.step()
-                
-                # Statistics
-                running_loss += loss.item()
-                running_mae += torch.mean(torch.abs(outputs.squeeze() - targets)).item()
-            
-            # Calculate epoch metrics
-            epoch_loss = running_loss / len(train_loader)
-            epoch_mae = running_mae / len(train_loader)
-            
-            self.training_history['lstm_loss'].append(epoch_loss)
-            self.training_history['lstm_mae'].append(epoch_mae)
-            
-            print(f'Epoch {epoch+1}: Loss={epoch_loss:.4f}, MAE={epoch_mae:.2f}')
-            
-            # Save model periodically
-            if (epoch + 1) % self.save_interval == 0:
-                self._save_model('lstm', epoch + 1)
-        
-        print("✅ LSTM Training Complete!")
-        return self.training_history['lstm_loss'], self.training_history['lstm_mae']
+    # LSTM training removed - using rule-based shelf life prediction instead
+    # def train_lstm(self, train_loader: DataLoader, val_loader: DataLoader = None):
+    #     """Train the LSTM for shelf life prediction - DEPRECATED: Using rule-based approach"""
+    #     print("⚠️  LSTM training is no longer used. Using rule-based shelf life prediction instead.")
+    #     pass
     
     def _format_targets(self, targets: List):
         """Format targets for Mask R-CNN training"""
@@ -412,8 +364,8 @@ def main():
         # Train Defect Detector
         defect_loss = trainer.train_defect_detector(train_loader, val_loader)
         
-        # Train LSTM
-        lstm_loss, lstm_mae = trainer.train_lstm(train_loader, val_loader)
+        # LSTM training removed - using rule-based shelf life prediction instead
+        print("ℹ️  Using rule-based shelf life prediction (no training required)")
         
         # Save final models
         trainer.save_final_models()

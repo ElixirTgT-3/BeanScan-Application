@@ -148,7 +148,7 @@ class ApiService {
   static const String baseUrl = 'http://localhost:8000';
   
   // For Android device, use computer's actual IP address
-  static const String androidBaseUrl = 'http://192.168.1.9:8000';
+  static const String androidBaseUrl = 'http://192.168.1.17:8000';
   
   static String get apiUrl {
     // Check if running on Android emulator
@@ -355,7 +355,7 @@ class ApiService {
       // Create multipart request
       var request = http.MultipartRequest(
         'POST',
-        Uri.parse('$apiUrl/api/v1/test-scan'),
+        Uri.parse('$apiUrl/api/v1/scan'),
       );
 
       // Add the image file

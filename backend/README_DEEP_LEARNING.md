@@ -33,12 +33,12 @@ MobileNetV3 + FPN → RPN → ROI Heads → Mask Prediction
 # Defect Types: Mold, Insect Damage, Discoloration, Physical Damage
 ```
 
-#### **3. ShelfLifeLSTM**
+#### **3. RuleBasedShelfLife**
 ```python
 # Architecture
-Bidirectional LSTM → Multi-Head Attention → Dense Layers → Regression
+Defect Analysis → Weighted Scoring → Rule-based Classification → Shelf Life Prediction
 # Output: Days until expiration, confidence, risk category
-# Features: Sequential defect progression analysis
+# Features: Rule-based defect severity analysis with bean type consideration
 ```
 
 ## 🚀 Quick Start
@@ -57,12 +57,12 @@ pip install -r requirements_ml.txt
 from ml.custom_models import create_models
 
 # Create all models
-models = create_models(device='cpu')  # Use 'cuda' for GPU
+models = create_models(device='cuda')  # Use 'cuda' for GPU
 
 # Test individual models
 cnn = models['cnn']
 defect_detector = models['defect_detector']
-lstm = models['lstm']
+shelf_life_model = models['shelf_life_model']
 ensemble = models['ensemble']
 ```
 
