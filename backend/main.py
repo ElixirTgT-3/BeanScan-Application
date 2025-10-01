@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import os
@@ -44,10 +44,19 @@ async def root():
     """Root endpoint"""
     return {"message": "BeanScan API is running!"}
 
+# Respond 200 to HEAD probes too
+@app.head("/")
+async def root_head():
+    return Response(status_code=200)
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "BeanScan API"}
+
+@app.head("/health")
+async def health_head():
+    return Response(status_code=200)
 
 if __name__ == "__main__":
     uvicorn.run(

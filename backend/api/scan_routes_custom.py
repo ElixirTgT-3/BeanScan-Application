@@ -8,9 +8,35 @@ import torch
 import torchvision.transforms as transforms
 from PIL import Image
 import io
+import threading
 
 from ml.custom_models import BeanScanEnsemble, create_models
 from database.supabase_client import supabase, BEAN_IMAGE_TABLE, BEAN_TYPE_TABLE, DEFECT_TABLE, SHELF_LIFE_TABLE, HISTORY_TABLE
+
+# Limit CPU thread usage on constrained hosts
+try:
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+except Exception:
+    pass
+
+# Lazy-loaded model holders
+_models_lock = threading.Lock()
+_models = None
+_ensemble = None
+
+def _get_models():
+    global _models, _ensemble
+    if _models is not None and _ensemble is not None:
+        return _models, _ensemble
+    with _models_lock:
+        if _models is None or _ensemble is None:
+            print("🚀 Initializing deep learning models (lazy-load)...")
+            _models = create_models(device='cpu')
+            _ensemble = _models['ensemble']
+            print("✅ Models initialized")
+    return _models, _ensemble
+
 
 def _estimate_bean_count(image_path, defect_detection, health_score):
     """
@@ -74,6 +100,7 @@ def _estimate_bean_count(image_path, defect_detection, health_score):
         print(f"Error in bean counting: {e}")
         return _fallback_bean_count(defect_detection, health_score)
 
+
 def _fallback_bean_count(defect_detection, health_score):
     """
     Fallback bean counting method when computer vision fails.
@@ -99,12 +126,6 @@ def _fallback_bean_count(defect_detection, health_score):
     }
 
 router = APIRouter()
-
-# Initialize custom models
-print("🚀 Loading custom deep learning models...")
-models = create_models(device='cpu')  # Use 'cuda' if GPU available
-ensemble = models['ensemble']
-print("✅ Models loaded successfully!")
 
 # Image transformations for the models
 transform = transforms.Compose([
@@ -175,9 +196,10 @@ async def scan_bean_image(
             image_pil = Image.open(io.BytesIO(image_bytes)).convert('RGB')
             image_tensor = transform(image_pil).unsqueeze(0)  # Add batch dimension
             
-            # Run complete analysis using ensemble model
+            # Run complete analysis using ensemble model (lazy-load on demand)
             print("🔍 Running deep learning analysis...")
             try:
+                models, ensemble = _get_models()
                 analysis_results = ensemble.forward(image_tensor)
                 print("✅ Ensemble analysis completed")
             except Exception as e:
@@ -485,8 +507,9 @@ async def advanced_bean_analysis(
         image_pil = Image.open(io.BytesIO(image_bytes)).convert('RGB')
         image_tensor = transform(image_pil).unsqueeze(0)
         
-        # Run analysis based on options
+        # Run analysis based on options (lazy-load core models)
         results = {}
+        models, _ = _get_models()
         
         # Always run bean classification
         bean_results = models['cnn'].predict(image_tensor)
