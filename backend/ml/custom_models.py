@@ -1,12 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import mobilenet_v3_small, mobilenet_v3_large
-from torchvision.models.detection import maskrcnn_resnet50_fpn
-from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn, FasterRCNN_MobileNet_V3_Large_FPN_Weights
-from torchvision.models.detection.backbone_utils import BackboneWithFPN
+from torchvision.models import mobilenet_v3_small
+from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 import torchvision.transforms as transforms
 from typing import Dict, List, Tuple, Optional
 import numpy as np
@@ -16,11 +13,9 @@ class MobileNetV3Backbone(nn.Module):
     
     def __init__(self, pretrained: bool = True, width_mult: float = 1.0):
         super().__init__()
-        # Load pretrained MobileNetV3
-        if pretrained:
-            self.backbone = mobilenet_v3_small(pretrained=True)
-        else:
-            self.backbone = mobilenet_v3_small(pretrained=False)
+        # Load MobileNetV3 WITHOUT downloading pretrained weights (we load our own checkpoints later)
+        # Using torchvision >=0.13 style: pass weights=None to avoid network download
+        self.backbone = mobilenet_v3_small(weights=None)
         
         # Extract features from different layers
         self.features = self.backbone.features
@@ -41,7 +36,8 @@ class BeanClassifierCNN(nn.Module):
     
     def __init__(self, num_classes: int = 4, pretrained: bool = True):
         super().__init__()
-        self.backbone = MobileNetV3Backbone(pretrained=pretrained)
+        # Disable pretrained to avoid runtime download; checkpoints are loaded later
+        self.backbone = MobileNetV3Backbone(pretrained=False)
         
         # Classification head (increased dropout ~0.3 to mitigate overfitting)
         self.classifier = nn.Sequential(
@@ -98,9 +94,8 @@ class DefectDetectorMaskRCNN(nn.Module):
     def __init__(self, num_classes: int = 6, pretrained: bool = True):
         super().__init__()
         
-        # Use MobileNetV3 backbone with FPN (matches your trained model)
-        weights = FasterRCNN_MobileNet_V3_Large_FPN_Weights.COCO_V1 if pretrained else None
-        self.model = fasterrcnn_mobilenet_v3_large_fpn(weights=weights)
+        # Use MobileNetV3 backbone with FPN WITHOUT downloading pretrained weights
+        self.model = fasterrcnn_mobilenet_v3_large_fpn(weights=None)
         
         # Customize box predictor for defect classes
         in_features = self.model.roi_heads.box_predictor.cls_score.in_features
@@ -165,7 +160,7 @@ class DefectDetectorFasterRCNN(nn.Module):
         super().__init__()
         # num_classes should include background (>=2)
         self.num_classes = max(2, num_classes)
-        self.model = fasterrcnn_mobilenet_v3_large_fpn(pretrained=pretrained)
+        self.model = fasterrcnn_mobilenet_v3_large_fpn(weights=None)
         in_features = self.model.roi_heads.box_predictor.cls_score.in_features
         self.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, self.num_classes)
         
