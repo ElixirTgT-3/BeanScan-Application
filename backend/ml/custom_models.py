@@ -95,7 +95,7 @@ class DefectDetectorMaskRCNN(nn.Module):
         super().__init__()
         
         # Use MobileNetV3 backbone with FPN WITHOUT downloading pretrained weights
-        self.model = fasterrcnn_mobilenet_v3_large_fpn(weights=None)
+        self.model = fasterrcnn_mobilenet_v3_large_fpn(weights=None, weights_backbone=None)
         
         # Customize box predictor for defect classes
         in_features = self.model.roi_heads.box_predictor.cls_score.in_features
@@ -160,7 +160,7 @@ class DefectDetectorFasterRCNN(nn.Module):
         super().__init__()
         # num_classes should include background (>=2)
         self.num_classes = max(2, num_classes)
-        self.model = fasterrcnn_mobilenet_v3_large_fpn(weights=None)
+        self.model = fasterrcnn_mobilenet_v3_large_fpn(weights=None, weights_backbone=None)
         in_features = self.model.roi_heads.box_predictor.cls_score.in_features
         self.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, self.num_classes)
         
