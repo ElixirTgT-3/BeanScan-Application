@@ -46,83 +46,111 @@ class SettingsPage extends StatelessWidget {
         child: ListView(
           padding: const EdgeInsets.all(AppConstants.defaultPadding),
           children: [
-            // Scanning Preferences Section
-            _buildSectionTitle("Scanning Preferences"),
-            _buildSettingItem(Icons.crop_square, "Default Scan Mode"),
-            _buildSettingItem(Icons.camera_alt, "Camera Settings"),
-            _buildSettingItem(Icons.landscape, "Image Quality"),
-            _buildSettingItem(Icons.download, "Auto-Save Scans"),
-            
-            const SizedBox(height: AppConstants.extraLargePadding),
-            
-            // App Preferences Section
-            _buildSectionTitle("App Preferences"),
-            _buildSettingItem(Icons.language, "Language"),
-            _buildSettingItem(Icons.dark_mode, "Theme"),
-            
-            const SizedBox(height: AppConstants.extraLargePadding),
-            
-            // Support & About Section
-            _buildSectionTitle("Support & About"),
-            _buildSettingItem(Icons.help, "Help Center"),
-            _buildSettingItem(Icons.info, "About the App"),
+            _buildSection(
+              title: "General Preferences",
+              children: [
+                _buildSettingItem(Icons.download, "Auto-Save Scans"),
+                _buildDivider(),
+                _buildSettingItem(Icons.dark_mode, "Theme"),
+              ],
+            ),
+            _buildSection(
+              title: "Support & About",
+              children: [
+                _buildSettingItem(Icons.help_outline, "Help Center"),
+                _buildDivider(),
+                _buildSettingItem(Icons.info_outline, "About the App"),
+              ],
+            ),
+            const SizedBox(height: AppConstants.largeSpacing),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildSectionTitle(String title) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: AppConstants.mediumSpacing, top: AppConstants.smallSpacing),
-      child: Text(
-        title,
-        style: const TextStyle(
-          fontSize: 16,
-          fontWeight: FontWeight.bold,
-          color: AppColors.primaryBrown,
-        ),
+  Widget _buildSection({required String title, required List<Widget> children}) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: AppConstants.largeSpacing),
+      decoration: BoxDecoration(
+        color: AppColors.lightBeige,
+        borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppConstants.largePadding,
+              AppConstants.largePadding,
+              AppConstants.largePadding,
+              AppConstants.smallSpacing,
+            ),
+            child: Text(
+              title,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: AppColors.primaryBrown,
+              ),
+            ),
+          ),
+          ...children,
+          const SizedBox(height: AppConstants.smallSpacing),
+        ],
       ),
     );
   }
 
   Widget _buildSettingItem(IconData icon, String title) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 1),
-      decoration: const BoxDecoration(
-        border: Border(
-          bottom: BorderSide(
-            color: AppColors.dividerGrey,
-            width: AppConstants.thinBorder,
-          ),
-        ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppConstants.largePadding,
+        vertical: AppConstants.smallSpacing,
       ),
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(vertical: AppConstants.smallSpacing, horizontal: 0),
-        leading: Container(
-          width: AppConstants.iconButtonSize,
-          height: AppConstants.iconButtonSize,
-          decoration: BoxDecoration(
-            color: AppColors.iconBackground,
-            borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+      child: Row(
+        children: [
+          Container(
+            width: AppConstants.iconButtonSize,
+            height: AppConstants.iconButtonSize,
+            decoration: BoxDecoration(
+              color: AppColors.iconBackground,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.primaryBrown.withOpacity(0.2), width: AppConstants.thinBorder),
+            ),
+            child: Icon(
+              icon,
+              color: AppColors.primaryBrown,
+              size: AppConstants.smallIconSize,
+            ),
           ),
-          child: Icon(
-            icon,
+          const SizedBox(width: AppConstants.mediumSpacing),
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: AppColors.primaryBrown,
+                fontSize: 16,
+              ),
+            ),
+          ),
+          const Icon(
+            Icons.chevron_right,
             color: AppColors.primaryBrown,
-            size: AppConstants.smallIconSize,
           ),
-        ),
-        title: Text(
-          title,
-          style: const TextStyle(
-            color: AppColors.primaryBrown,
-            fontSize: 16,
-          ),
-        ),
-        trailing: const Icon(
-          Icons.chevron_right,
-          color: AppColors.primaryBrown,
-        ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDivider() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AppConstants.largePadding),
+      child: const Divider(
+        color: AppColors.dividerGrey,
+        thickness: AppConstants.thinBorder,
+        height: 1,
       ),
     );
   }

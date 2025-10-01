@@ -1,6 +1,6 @@
 # BeanScan Application
 
-A Flutter application for scanning coffee beans to detect molds and defects.
+A Flutter application for scanning coffee beans to detect coffee defects.
 
 ## Project Structure
 

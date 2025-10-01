@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 import os
 from dotenv import load_dotenv
@@ -32,6 +33,11 @@ app.add_middleware(
 # Include routers
 app.include_router(scan_routes_custom.router, prefix="/api/v1", tags=["scan"])
 app.include_router(history_routes.router, prefix="/api/v1", tags=["history"])
+
+# Serve images from local static directory
+static_images_dir = os.path.join(os.path.dirname(__file__), "static", "images")
+os.makedirs(static_images_dir, exist_ok=True)
+app.mount("/images", StaticFiles(directory=static_images_dir), name="images")
 
 @app.get("/")
 async def root():

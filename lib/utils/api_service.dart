@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
 class BeanPrediction {
   final String prediction;
@@ -145,31 +147,59 @@ class DefectSummary {
 }
 
 class ApiService {
-  static const String baseUrl = 'http://localhost:8000';
+  // Allow overriding via --dart-define=API_BASE_URL=... and --dart-define=ANDROID_API_BASE_URL=...
+  static const String baseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: 'http://localhost:8000',
+  );
   
-  // For Android device, use computer's actual IP address
-  static const String androidBaseUrl = 'http://192.168.1.17:8000';
+  // For Android device/emulator, set with --dart-define=ANDROID_API_BASE_URL=http://<IP>:8000
+  static const String androidBaseUrl = String.fromEnvironment(
+    'ANDROID_API_BASE_URL',
+    defaultValue: 'http://192.168.0.63:8000',
+  );
   
+  static String? _resolvedApiUrl;
   static String get apiUrl {
-    // Check if running on Android emulator
-    if (Platform.isAndroid) {
-      return androidBaseUrl;
-    }
+    if (_resolvedApiUrl != null) return _resolvedApiUrl!;
+    if (Platform.isAndroid) return androidBaseUrl;
     return baseUrl;
   }
 
   /// Check if the API is healthy
   static Future<bool> checkHealth() async {
-    try {
-      final response = await http.get(
-        Uri.parse('$apiUrl/health'),
-        headers: {'Content-Type': 'application/json'},
-      );
-      return response.statusCode == 200;
-    } catch (e) {
-      print('Health check failed: $e');
-      return false;
+    final candidates = <String>[
+      apiUrl,
+      if (Platform.isAndroid) ...[
+        // Android emulator default host mapping
+        'http://10.0.2.2:8000',
+        // Genymotion emulator
+        'http://10.0.3.2:8000',
+      ],
+      // Common local fallbacks
+      'http://localhost:8000',
+      'http://127.0.0.1:8000',
+    ];
+
+    for (final url in candidates) {
+      try {
+        final response = await http.get(
+          Uri.parse('$url/health'),
+          headers: {'Content-Type': 'application/json'},
+        ).timeout(const Duration(seconds: 3));
+        if (response.statusCode == 200) {
+          _resolvedApiUrl = url;
+          if (url != apiUrl) {
+            print('API reachable at: $url (selected)');
+          }
+          return true;
+        }
+      } catch (e) {
+        // Try next candidate
+        print('Health check failed for $url: $e');
+      }
     }
+    return false;
   }
 
   /// Predict bean type from image file (legacy method - use scanBeanImage instead)
@@ -246,6 +276,12 @@ class ApiService {
           imageFile.path,
         ),
       );
+
+      // Add optional device identifier
+      final deviceId = await _getDeviceId();
+      if (deviceId != null && deviceId.isNotEmpty) {
+        request.fields['device_id'] = deviceId;
+      }
 
       // Send the request
       final streamedResponse = await request.send();
@@ -366,6 +402,12 @@ class ApiService {
         ),
       );
 
+      // Add optional device identifier
+      final deviceId = await _getDeviceId();
+      if (deviceId != null && deviceId.isNotEmpty) {
+        request.fields['device_id'] = deviceId;
+      }
+
       // Send the request
       final streamedResponse = await request.send();
       final response = await http.Response.fromStream(streamedResponse);
@@ -390,5 +432,93 @@ class ApiService {
         'error': 'Network error: $e',
       };
     }
+  }
+
+  // ===================== History Endpoints =====================
+  static Future<Map<String, dynamic>> fetchHistory({int limit = 50, int offset = 0}) async {
+    try {
+      // Ensure base URL is reachable and resolved
+      await checkHealth();
+      final deviceId = await _getDeviceId();
+      final url = Uri.parse('$apiUrl/api/v1/history?device_id=${Uri.encodeComponent(deviceId ?? '')}&limit=$limit&offset=$offset');
+      // Debug: print URL
+      // ignore: avoid_print
+      print('Fetching history: GET ' + url.toString());
+      final response = await http.get(url).timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        return {'success': true, 'data': json.decode(response.body)};
+      }
+      // ignore: avoid_print
+      print('History API Error: ' + response.statusCode.toString() + ' - ' + response.body);
+      return {'success': false, 'error': 'API Error ${response.statusCode}: ${response.body}'};
+    } catch (e) {
+      // ignore: avoid_print
+      print('History fetch failed: ' + e.toString());
+      return {'success': false, 'error': 'Network error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> fetchHistoryDetails(int historyId) async {
+    try {
+      await checkHealth();
+      final url = Uri.parse('$apiUrl/api/v1/history/$historyId');
+      // ignore: avoid_print
+      print('Fetching history details: GET ' + url.toString());
+      final response = await http.get(url).timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        return {'success': true, 'data': json.decode(response.body)};
+      }
+      // ignore: avoid_print
+      print('History details API Error: ' + response.statusCode.toString() + ' - ' + response.body);
+      return {'success': false, 'error': 'API Error ${response.statusCode}: ${response.body}'};
+    } catch (e) {
+      // ignore: avoid_print
+      print('History details fetch failed: ' + e.toString());
+      return {'success': false, 'error': 'Network error: $e'};
+    }
+  }
+
+  // Persisted per-install device ID (no auth)
+  static String? _cachedDeviceId;
+  static Future<String?> _getDeviceId() async {
+    try {
+      if (_cachedDeviceId != null) return _cachedDeviceId;
+      // Use a simple on-disk GUID stored in app documents directory
+      final dir = await _getAppDir();
+      final file = File('${dir.path}/beanscan_device_id.txt');
+      if (await file.exists()) {
+        final id = (await file.readAsString()).trim();
+        if (id.isNotEmpty) {
+          _cachedDeviceId = id;
+          return id;
+        }
+      }
+      final newId = _generateGuid();
+      await file.writeAsString(newId, flush: true);
+      _cachedDeviceId = newId;
+      return newId;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<Directory> _getAppDir() async {
+    final dir = await getApplicationSupportDirectory();
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  static String _generateGuid() {
+    // Random v4 style GUID
+    final rnd = Random.secure();
+    List<int> bytes(int length) => List<int>.generate(length, (_) => rnd.nextInt(256));
+    String hex(List<int> b) => b.map((v) => v.toRadixString(16).padLeft(2, '0')).join();
+    final b = bytes(16);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant
+    final s = hex(b);
+    return '${s.substring(0,8)}-${s.substring(8,12)}-${s.substring(12,16)}-${s.substring(16,20)}-${s.substring(20,32)}';
   }
 }

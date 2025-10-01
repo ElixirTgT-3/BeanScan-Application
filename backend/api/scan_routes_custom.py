@@ -118,7 +118,8 @@ transform = transforms.Compose([
 async def scan_bean_image(
     image: UploadFile = File(...),
     user_id: Optional[int] = None,
-    location: Optional[str] = None
+    location: Optional[str] = None,
+    device_id: Optional[str] = None
 ):
     """
     Scan and analyze a bean image using custom deep learning models
@@ -150,12 +151,24 @@ async def scan_bean_image(
         file_extension = image.filename.split('.')[-1] if '.' in image.filename else 'jpg'
         filename = f"{uuid.uuid4()}.{file_extension}"
         
-        # Save image temporarily
+        # Save image temporarily and also copy to static/images for serving
         temp_path = f"temp/{filename}"
         os.makedirs("temp", exist_ok=True)
         
         with open(temp_path, "wb") as f:
             f.write(image_bytes)
+        
+        # Copy to static folder served by FastAPI
+        try:
+            static_dir = os.path.join(os.path.dirname(__file__), "..", "static", "images")
+            static_dir = os.path.abspath(static_dir)
+            os.makedirs(static_dir, exist_ok=True)
+            static_path = os.path.join(static_dir, filename)
+            with open(static_path, "wb") as sf:
+                sf.write(image_bytes)
+            public_image_url = f"/images/{filename}"
+        except Exception:
+            public_image_url = f"/images/{filename}"
         
         try:
             # Load and preprocess image for models
@@ -178,6 +191,40 @@ async def scan_bean_image(
             
             print(f"📊 Analysis complete: Bean={bean_classification[0]['class']}, Health={health_score['grade']}")
             
+            # Resolve user by device_id when provided (no login flow)
+            resolved_user_id = user_id
+            try:
+                if device_id and not user_id:
+                    # Prefer explicit device_id column if present; fallback to Name
+                    user_lookup = None
+                    try:
+                        user_lookup = supabase.table("User").select("user_id").eq("device_id", device_id).limit(1).execute()
+                    except Exception:
+                        user_lookup = None
+                    if not (user_lookup and user_lookup.data):
+                        user_lookup = supabase.table("User").select("user_id").eq("Name", device_id).limit(1).execute()
+
+                    if user_lookup and user_lookup.data:
+                        resolved_user_id = user_lookup.data[0]["user_id"]
+                    else:
+                        # Create a lightweight user row for this device
+                        payload = {
+                            "Name": device_id,
+                            "role": "user",
+                            "location": location or None
+                        }
+                        # Try to set device_id column if it exists
+                        try:
+                            payload["device_id"] = device_id
+                        except Exception:
+                            pass
+                        new_user = supabase.table("User").insert(payload).execute()
+                        if new_user.data:
+                            resolved_user_id = new_user.data[0]["user_id"]
+            except Exception as _user_err:
+                # Proceed without user if mapping fails
+                resolved_user_id = user_id
+
             # Get or create bean type
             bean_type_name = bean_classification[0]['class']
             bean_type_result = supabase.table(BEAN_TYPE_TABLE).select("bean_type_id").eq("type_name", bean_type_name).execute()
@@ -194,10 +241,10 @@ async def scan_bean_image(
             
             # Prepare image data
             image_data = {
-                "user_id": user_id,
+                "user_id": resolved_user_id,
                 "bean_type_id": bean_type_id,
                 "image_path": filename,
-                "image_url": f"/images/{filename}",
+                "image_url": public_image_url,
                 "file_size": len(image_bytes),
                 "image_format": file_extension.upper(),
                 "capture_date": datetime.utcnow().isoformat()
@@ -254,9 +301,7 @@ async def scan_bean_image(
             shelf_life_result = supabase.table(SHELF_LIFE_TABLE).insert(shelf_life_data).execute()
             shelf_life_id = shelf_life_result.data[0]["shelf_life_id"]
             
-            # Calculate bean count estimation
-            # Use computer vision to count beans in the actual image
-            estimated_bean_count = _estimate_bean_count(temp_path, defect_detection, health_score)
+            # Bean counting removed from response/data model
             
             # Calculate percentages for history
             healthy_percent = health_score['percentage']
@@ -264,7 +309,7 @@ async def scan_bean_image(
             
             # Create history record
             history_data = {
-                "user_id": user_id,
+                "user_id": resolved_user_id,
                 "image_id": image_id,
                 "shelf_life_id": shelf_life_id,
                 "bean_type_id": bean_type_id,
@@ -300,10 +345,7 @@ async def scan_bean_image(
                             "quality_grade": health_score.get('grade', 'F')
                         }
                     },
-                    "bean_count": {
-                        "estimated_count": estimated_bean_count,
-                        "confidence": "medium"  # Simple estimation confidence
-                    },
+                    # bean_count removed
                     "health_score": health_score,
                     "shelf_life": {
                         "predicted_days": shelf_life_data["predicted_days"],

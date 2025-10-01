@@ -144,7 +144,6 @@ class DefectDetectorMaskRCNN(nn.Module):
                         defect = {
                             'bbox': boxes[i].tolist(),
                             'confidence': scores[i].item(),
-                            'mask': None,  # No masks in Faster R-CNN
                             'defect_type': self.defect_types[labels[i].item() - 1],  # -1 for background
                             'area': area.item(),
                             'coordinates': {
@@ -209,7 +208,6 @@ class RuleBasedShelfLife:
     def __init__(self):
         # Defect severity weights (higher = more critical)
         self.defect_weights = {
-            'mold': 10.0,
             'insect_damage': 8.0,
             'discoloration': 6.0,
             'physical_damage': 4.0,
@@ -280,8 +278,6 @@ class RuleBasedShelfLife:
             predicted_days = base_days * (1 - penalty_factor)
         
         # Apply specific rules for critical defects
-        if 'mold' in defect_counts and defect_counts['mold'] > 0:
-            predicted_days = min(predicted_days, 2)  # Mold = immediate concern
         
         if 'insect_damage' in defect_counts and defect_counts['insect_damage'] > 2:
             predicted_days = min(predicted_days, 5)  # Heavy insect damage = critical
@@ -350,12 +346,25 @@ class BeanScanEnsemble(nn.Module):
         defects = self.defect_model.detect_defects(image)
         results['defect_detection'] = defects
         
-        # 3. Shelf life prediction (if sequence provided)
-        if defect_sequence is not None:
-            # Get bean type for rule-based prediction
-            bean_type = results.get('bean_classification', [{}])[0].get('class', 'Arabica') if results.get('bean_classification') else 'Arabica'
-            shelf_life = self.shelf_life_model.predict_shelf_life(defect_sequence, bean_type)
-            results['shelf_life_prediction'] = shelf_life
+        # 3. Shelf life prediction (always compute; derive sequence from defects when not provided)
+        # Determine bean type string for rule-based prediction
+        bean_type_name = results.get('bean_classification', [{}])[0].get('class', 'Arabica') if results.get('bean_classification') else 'Arabica'
+
+        # Build a defect sequence if none provided, based on detected defects
+        derived_defect_sequence = defect_sequence
+        if derived_defect_sequence is None:
+            derived_defect_sequence = []
+            if defects:
+                for defect in defects:
+                    derived_defect_sequence.append({
+                        'type': defect.get('defect_type', 'unknown'),
+                        'confidence': defect.get('confidence', 0.5),
+                        'count': 1
+                    })
+
+        # Always compute shelf life using rule-based model (handles empty sequences)
+        shelf_life = self.shelf_life_model.predict_shelf_life(derived_defect_sequence, bean_type_name)
+        results['shelf_life_prediction'] = shelf_life
         
         # 4. Calculate overall health score
         health_score = self._calculate_health_score(bean_type, defects)
@@ -373,9 +382,7 @@ class BeanScanEnsemble(nn.Module):
         if defects:
             for defect in defects:
                 # Higher penalty for more severe defects
-                if defect['defect_type'] == 'Mold':
-                    defect_penalty += 0.3
-                elif defect['defect_type'] == 'Insect_Damage':
+                if defect['defect_type'] == 'Insect_Damage':
                     defect_penalty += 0.25
                 elif defect['defect_type'] == 'Discoloration':
                     defect_penalty += 0.15
@@ -451,9 +458,12 @@ def save_models(models: Dict, save_dir: str = './models'):
     os.makedirs(save_dir, exist_ok=True)
     
     for name, model in models.items():
-        # Skip saving rule-based model (no state to save)
+        # Skip saving rule-based model (no state to save) and ensemble (composed of submodels)
         if name == 'shelf_life_model':
             print(f"✅ Rule-based {name} model (no state to save)")
+            continue
+        if name == 'ensemble':
+            print("✅ Skipping saving 'ensemble' (composed of cnn + defect; no standalone weights needed)")
             continue
         
         torch.save(model.state_dict(), os.path.join(save_dir, f'{name}.pth'))
@@ -475,12 +485,15 @@ def load_models(device: str = 'cpu', models: Dict = None, model_dir: str = './mo
         if name == 'shelf_life_model':
             print(f"✅ Rule-based {name} model (no state to load)")
             continue
+        # Skip loading ensemble weights to avoid architecture mismatch; it's composed from submodels
+        if name == 'ensemble':
+            print("✅ Skipping loading weights for 'ensemble' (composed of cnn + defect); using submodels' weights")
+            continue
         
         # Map model names to actual file names
         model_file_map = {
             'cnn': 'cnn_best.pth',
-            'defect_detector': 'best_model.pth',  # Use best_model.pth for defect detection
-            'ensemble': 'cnn_final.pth'  # Use cnn_final.pth for ensemble (or skip if not available)
+            'defect_detector': 'best_model.pth'  # Use best_model.pth for defect detection
         }
         
         model_filename = model_file_map.get(name, f'{name}.pth')

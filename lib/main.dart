@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'pages/history_page.dart';
 import 'pages/scan_page.dart';
 import 'pages/settings_page.dart';
+import 'pages/splash_page.dart';
 import 'utils/app_colors.dart';
 import 'utils/app_constants.dart';
 
@@ -17,7 +18,7 @@ class BeanScanApp extends StatelessWidget {
       theme: ThemeData(
         scaffoldBackgroundColor: AppColors.lightBeige,
       ),
-      home: const MainNavigationPage(),
+      home: const SplashPage(),
     );
   }
 }
@@ -36,7 +37,9 @@ class _MainNavigationPageState extends State<MainNavigationPage> {
   Widget build(BuildContext context) {
     final pages = [
       const HistoryPage(),
-      const ScanPage(),
+      ScanPage(
+        onClose: () => setState(() => currentPageIndex = 0),
+      ),
       const SettingsPage(),
     ];
 

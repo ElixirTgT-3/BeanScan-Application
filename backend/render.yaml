@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: beanscan-api
+    env: docker
+    rootDir: .
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: API_HOST
+        value: 0.0.0.0
+      - key: API_PORT
+        value: 8000
+      - key: DEBUG
+        value: "False"
+      # Supabase keys, set these in Render dashboard (do not commit secrets)
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+    dockerfilePath: Dockerfile

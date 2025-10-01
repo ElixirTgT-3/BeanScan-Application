@@ -3,13 +3,13 @@ import 'dart:io';
 import '../utils/app_colors.dart';
 import '../utils/app_constants.dart';
 import '../utils/api_service.dart';
+import '../widgets/bean_severity_icon.dart';
 
 class ResultsPage extends StatelessWidget {
   final BeanPrediction prediction;
   final String imagePath;
   final Map<String, dynamic>? defectDetection;
   final Map<String, dynamic>? shelfLife;
-  final Map<String, dynamic>? beanCount;
 
   const ResultsPage({
     super.key,
@@ -17,7 +17,6 @@ class ResultsPage extends StatelessWidget {
     required this.imagePath,
     this.defectDetection,
     this.shelfLife,
-    this.beanCount,
   });
 
   @override
@@ -28,21 +27,22 @@ class ResultsPage extends StatelessWidget {
     print('  - imagePath: $imagePath');
     print('  - defectDetection: $defectDetection');
     print('  - shelfLife: $shelfLife');
-    print('  - beanCount: $beanCount');
+    
     
     return Scaffold(
-      backgroundColor: AppColors.scanDarkGrey,
+      backgroundColor: AppColors.lightBeige,
       appBar: AppBar(
-        backgroundColor: AppColors.scanDarkGrey,
+        backgroundColor: AppColors.lightBeige,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          icon: const Icon(Icons.arrow_back, color: AppColors.primaryBrown),
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: const Text(
           'Scanned Coffee Bean Result',
-          style: TextStyle(color: Colors.white),
+          style: TextStyle(color: AppColors.primaryBrown, fontWeight: FontWeight.w700),
         ),
+        centerTitle: false,
       ),
       body: SafeArea(
         child: SingleChildScrollView(
@@ -58,8 +58,16 @@ class ResultsPage extends StatelessWidget {
                 _buildDefectDetectionCard(),
                 const SizedBox(height: AppConstants.largeSpacing),
               ],
-              _buildHealthTiles(),
+              _buildSeverityAndDefectiveTiles(),
               const SizedBox(height: AppConstants.largeSpacing),
+              const Text(
+                'Scan another image?',
+                style: TextStyle(
+                  color: AppColors.primaryBrown,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: AppConstants.smallSpacing),
               _buildYesNoButtons(context),
             ],
           ),
@@ -70,24 +78,19 @@ class ResultsPage extends StatelessWidget {
 
   Widget _buildImagePreview() {
     return Container(
-      height: 210,
+      height: 220,
       width: double.infinity,
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.15),
-        borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
-        border: Border.all(color: Colors.white24),
+        color: Colors.grey[200],
+        borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
       ),
       clipBehavior: Clip.antiAlias,
       child: imagePath.isNotEmpty
           ? Stack(
               children: [
                 // Base image
-                Image.file(
-                  File(imagePath), 
-                  fit: BoxFit.cover,
-                  width: double.infinity,
-                  height: double.infinity,
-                ),
+                _buildImageWidget(),
                 // Defect annotations overlay
                 if (defectDetection != null && defectDetection!['detections'] != null)
                   _buildDefectAnnotations(),
@@ -102,9 +105,30 @@ class ResultsPage extends StatelessWidget {
     );
   }
 
+  Widget _buildImageWidget() {
+    final isHttp = imagePath.startsWith('http');
+    final isAbsolutePath = imagePath.startsWith('/') || imagePath.startsWith('http');
+    final String url = imagePath.startsWith('/') ? (ApiService.apiUrl + imagePath) : imagePath;
+    if (isHttp || imagePath.startsWith('/')) {
+      return Image.network(
+        url,
+        fit: BoxFit.cover,
+        width: double.infinity,
+        height: double.infinity,
+        errorBuilder: (c, e, s) => const Center(child: Icon(Icons.broken_image, color: Colors.white54, size: 48)),
+      );
+    }
+    return Image.file(
+      File(imagePath),
+      fit: BoxFit.cover,
+      width: double.infinity,
+      height: double.infinity,
+    );
+  }
+
   Widget _buildDefectAnnotations() {
-    final detections = defectDetection!['detections'] as List<dynamic>?;
-    if (detections == null || detections.isEmpty) {
+    final detections = _getDetections();
+    if (detections.isEmpty) {
       return const SizedBox.shrink();
     }
 
@@ -121,7 +145,7 @@ class ResultsPage extends StatelessWidget {
   }
 
   Widget _buildDefectCountOverlay() {
-    final summary = defectDetection!['summary'] as Map<String, dynamic>?;
+    final summary = _getDefectSummary();
     if (summary == null) return const SizedBox.shrink();
 
     final totalDefects = summary['total_defects'] as int? ?? 0;
@@ -156,37 +180,34 @@ class ResultsPage extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(AppConstants.largePadding),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.85),
-        borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(dateStr, style: const TextStyle(color: AppColors.textDarkGrey)),
-              const Icon(Icons.refresh, size: 18, color: AppColors.textDarkGrey),
+              Expanded(
+                child: Text(
+                  dateStr,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: AppColors.textDarkGrey),
+                ),
+              ),
+              IconButton(
+                onPressed: () {},
+                icon: const Icon(Icons.refresh, size: 18, color: AppColors.textDarkGrey),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              ),
             ],
           ),
           const SizedBox(height: AppConstants.mediumSpacing),
           Text('Type: ${prediction.prediction}', style: const TextStyle(color: AppColors.textDarkGrey)),
           const SizedBox(height: 8),
           
-          // Bean Count
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('Total Beans:', style: TextStyle(color: AppColors.textDarkGrey)),
-              Text(
-                _getBeanCount(),
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textDarkGrey,
-                ),
-              ),
-            ],
-          ),
           const SizedBox(height: AppConstants.mediumSpacing),
           const Text('Estimated Shelf Life', style: TextStyle(fontWeight: FontWeight.w600, color: AppColors.textDarkGrey)),
           const SizedBox(height: 8),
@@ -198,16 +219,16 @@ class ResultsPage extends StatelessWidget {
               children: [
                 const Text('Predicted Days:', style: TextStyle(color: AppColors.textDarkGrey)),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                   decoration: BoxDecoration(
-                    color: _getShelfLifeColor(shelfLife!['category']),
-                    borderRadius: BorderRadius.circular(12),
+                    color: _getShelfLifeColor(((shelfLife!['category'] as String?) ?? _deriveShelfLifeCategory(shelfLife!))),
+                    borderRadius: BorderRadius.circular(24),
                   ),
                   child: Text(
                     '${shelfLife!['predicted_days'] ?? 0} days',
                     style: const TextStyle(
                       color: Colors.white,
-                      fontWeight: FontWeight.bold,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
                 ),
@@ -221,10 +242,10 @@ class ResultsPage extends StatelessWidget {
               children: [
                 const Text('Status:', style: TextStyle(color: AppColors.textDarkGrey)),
                 Text(
-                  shelfLife!['category'] ?? 'Unknown',
+                  ((shelfLife!['category'] as String?) ?? _deriveShelfLifeCategory(shelfLife!)),
                   style: TextStyle(
                     fontWeight: FontWeight.w600,
-                    color: _getShelfLifeTextColor(shelfLife!['category']),
+                    color: _getShelfLifeTextColor(((shelfLife!['category'] as String?) ?? _deriveShelfLifeCategory(shelfLife!))),
                   ),
                 ),
               ],
@@ -236,9 +257,11 @@ class ResultsPage extends StatelessWidget {
           const SizedBox(height: 6),
           Row(
             children: [
-              _circularScore(
+          _circularScore(
                 label: 'Confidence', 
-                percent: shelfLife != null ? (shelfLife!['confidence'] * 100).toDouble() : healthyPct, 
+            percent: shelfLife != null 
+                  ? (((shelfLife!['confidence_score'] ?? shelfLife!['confidence'] ?? 0.0) as num) * 100).toDouble() 
+                  : healthyPct, 
                 color: AppColors.primaryBrown
               ),
             ],
@@ -251,15 +274,16 @@ class ResultsPage extends StatelessWidget {
   Widget _buildDefectDetectionCard() {
     if (defectDetection == null) return const SizedBox.shrink();
     
-    final summary = defectDetection!['summary'];
-    final detections = defectDetection!['detections'] as List<dynamic>? ?? [];
+    final summary = _getDefectSummary() ?? <String, dynamic>{};
+    final detections = _getDetections();
     
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(AppConstants.largePadding),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.85),
-        borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -288,11 +312,11 @@ class ResultsPage extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                 decoration: BoxDecoration(
-                  color: _getQualityColor(summary['quality_grade']),
+                  color: _getQualityColor(summary['quality_grade'] as String?),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
-                  summary['quality_grade'] ?? 'Unknown',
+                  (summary['quality_grade'] as String?) ?? 'Unknown',
                   style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.bold,
@@ -325,7 +349,7 @@ class ResultsPage extends StatelessWidget {
             children: [
               const Text('Defect Area:', style: TextStyle(color: AppColors.textDarkGrey)),
               Text(
-                '${summary['defect_percentage']?.toStringAsFixed(1) ?? '0.0'}%',
+                '${((summary['defect_percentage'] ?? 0.0) as num).toStringAsFixed(1)}%',
                 style: const TextStyle(
                   fontWeight: FontWeight.w600,
                   color: AppColors.textDarkGrey,
@@ -345,7 +369,7 @@ class ResultsPage extends StatelessWidget {
             Wrap(
               spacing: 8,
               runSpacing: 4,
-              children: (summary['defect_types'] as Map<String, dynamic>).entries
+              children: (Map<String, dynamic>.from(summary['defect_types'] as Map)).entries
                   .map((entry) => Chip(
                         label: Text('${entry.key}: ${entry.value}'),
                         backgroundColor: Colors.orange.withOpacity(0.2),
@@ -359,7 +383,7 @@ class ResultsPage extends StatelessWidget {
     );
   }
 
-  Color _getQualityColor(String grade) {
+  Color _getQualityColor(String? grade) {
     switch (grade) {
       case 'A+':
       case 'A':
@@ -379,7 +403,7 @@ class ResultsPage extends StatelessWidget {
     }
   }
 
-  Color _getShelfLifeColor(String category) {
+  Color _getShelfLifeColor(String? category) {
     switch (category?.toLowerCase()) {
       case 'excellent':
         return Colors.green;
@@ -396,7 +420,7 @@ class ResultsPage extends StatelessWidget {
     }
   }
 
-  Color _getShelfLifeTextColor(String category) {
+  Color _getShelfLifeTextColor(String? category) {
     switch (category?.toLowerCase()) {
       case 'excellent':
         return Colors.green;
@@ -413,49 +437,102 @@ class ResultsPage extends StatelessWidget {
     }
   }
 
-  String _getBeanCount() {
-    // Use bean count from API response
-    if (beanCount != null && beanCount!['estimated_count'] != null) {
-      return beanCount!['estimated_count'].toString();
-    }
-    
-    // Fallback estimation based on defect detection data
-    if (defectDetection != null && defectDetection!['detections'] != null) {
-      final detections = defectDetection!['detections'] as List<dynamic>;
-      final estimatedCount = (detections.length * 1.5).round();
-      return '~$estimatedCount';
-    }
-    
-    return '~15'; // Default estimate
-  }
+  
 
-  Widget _buildHealthTiles() {
-    double healthy, defective;
-    
-    if (defectDetection != null && defectDetection!['summary'] != null) {
-      final qualityScore = defectDetection!['summary']['quality_score'] ?? 0.0;
-      healthy = (qualityScore * 100).clamp(0.0, 100.0);
-      defective = (100.0 - healthy).clamp(0.0, 100.0);
+  Widget _buildSeverityAndDefectiveTiles() {
+    // Derive defective% from summary if available; else from (1 - confidence)
+    double defectivePct = 0;
+    final summary = _getDefectSummary();
+    if (summary != null) {
+      defectivePct = ((summary['defect_percentage'] ?? 0.0) as num).toDouble();
     } else {
-      healthy = (prediction.confidence * 100).clamp(0.0, 100.0);
-      defective = (100.0 - healthy).clamp(0.0, 100.0);
+      defectivePct = (1.0 - prediction.confidence) * 100.0;
     }
-    
+
+    final int severityLevel = defectivePct < 15
+        ? 1
+        : (defectivePct < 35 ? 2 : 3);
+
     return Row(
       children: [
-        Expanded(child: _healthCard('Healthy:', healthy, Colors.green)),
+        Expanded(
+          child: _severityCard(severityLevel),
+        ),
         const SizedBox(width: AppConstants.mediumSpacing),
-        Expanded(child: _healthCard('Defective:', defective, AppColors.primaryBrown)),
+        Expanded(
+          child: _defectivePercentCard(defectivePct),
+        ),
       ],
     );
+  }
+
+  // ---------- Normalization helpers for history payloads ----------
+  Map<String, dynamic>? _getDefectSummary() {
+    if (defectDetection == null) return null;
+    if (defectDetection!['summary'] is Map<String, dynamic>) {
+      return Map<String, dynamic>.from(defectDetection!['summary'] as Map);
+    }
+    final dd = Map<String, dynamic>.from(defectDetection!);
+    final String type = (dd['defect_type'] as String?) ?? 'unknown';
+    final num percentage = (dd['defect_percentage'] as num?) ?? 0.0;
+    final String grade = _deriveQualityGrade(percentage.toDouble());
+    return {
+      'quality_grade': grade,
+      'total_defects': type == 'unknown' ? 0 : 1,
+      'defect_types': type == 'unknown' ? {} : {type: 1},
+      'defect_percentage': percentage.toDouble(),
+    };
+  }
+
+  List<dynamic> _getDetections() {
+    if (defectDetection == null) return const [];
+    if (defectDetection!['detections'] is List) {
+      return List<dynamic>.from(defectDetection!['detections'] as List);
+    }
+    final dd = Map<String, dynamic>.from(defectDetection!);
+    final coords = Map<String, dynamic>.from(
+      (dd['defect_coordinates'] as Map?) ?? <String, dynamic>{}
+    );
+    return [
+      {
+        'defect_type': dd['defect_type'] ?? 'unknown',
+        'confidence': (dd['confidence'] as num?)?.toDouble() ?? 0.0,
+        'coordinates': {
+          'x1': (coords['x1'] as num?)?.toDouble() ?? 0.0,
+          'y1': (coords['y1'] as num?)?.toDouble() ?? 0.0,
+          'x2': (coords['x2'] as num?)?.toDouble() ?? 0.0,
+          'y2': (coords['y2'] as num?)?.toDouble() ?? 0.0,
+        },
+      }
+    ];
+  }
+
+  // Derive a readable shelf-life status if backend did not store the category
+  String _deriveShelfLifeCategory(Map<String, dynamic> shelf) {
+    final int days = (shelf['predicted_days'] as num?)?.toInt() ?? 0;
+    if (days >= 30) return 'Excellent';
+    if (days >= 20) return 'Good';
+    if (days >= 10) return 'Warning';
+    if (days > 0) return 'Critical';
+    return 'Unknown';
+  }
+
+  // Derive a quality grade from defect percentage for history rows
+  String _deriveQualityGrade(double defectivePct) {
+    if (defectivePct < 10) return 'A';
+    if (defectivePct < 20) return 'B';
+    if (defectivePct < 35) return 'C';
+    if (defectivePct < 50) return 'D';
+    return 'F';
   }
 
   Widget _healthCard(String title, double percent, Color color) {
     return Container(
       padding: const EdgeInsets.all(AppConstants.largePadding),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.85),
-        borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -463,6 +540,53 @@ class ResultsPage extends StatelessWidget {
           Text(title, style: const TextStyle(color: AppColors.textDarkGrey)),
           const SizedBox(height: AppConstants.smallSpacing),
           Center(child: _circularPercent(percent: percent, color: color)),
+        ],
+      ),
+    );
+  }
+
+  Widget _severityCard(int severityLevel) {
+    final label = severityLevel == 1 ? 'Mild' : (severityLevel == 2 ? 'Moderate' : 'Severe');
+    return Container(
+      padding: const EdgeInsets.all(AppConstants.largePadding),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Severity:', style: TextStyle(color: AppColors.textDarkGrey)),
+          const SizedBox(height: AppConstants.smallSpacing),
+          Center(child: BeanSeverityIcon(severityLevel: severityLevel, size: 72, color: AppColors.primaryBrown)),
+          const SizedBox(height: AppConstants.smallSpacing),
+          Center(
+            child: Text(
+              label,
+              style: const TextStyle(color: AppColors.textDarkGrey, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _defectivePercentCard(double percent) {
+    percent = percent.clamp(0, 100);
+    return Container(
+      padding: const EdgeInsets.all(AppConstants.largePadding),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Defective (%)', style: TextStyle(color: AppColors.textDarkGrey)),
+          const SizedBox(height: AppConstants.smallSpacing),
+          Center(child: _circularPercent(percent: percent, color: AppColors.primaryBrown)),
         ],
       ),
     );

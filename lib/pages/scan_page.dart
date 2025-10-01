@@ -3,13 +3,15 @@ import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
+import 'dart:ui' as ui;
 import '../utils/app_colors.dart';
 import '../utils/app_constants.dart';
 import '../utils/api_service.dart';
 import 'results_page.dart';
 
 class ScanPage extends StatefulWidget {
-  const ScanPage({super.key});
+  final VoidCallback? onClose;
+  const ScanPage({super.key, this.onClose});
 
   @override
   State<ScanPage> createState() => _ScanPageState();
@@ -194,8 +196,22 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         );
       }
       
+      // Basic validation: reject overly dark images before sending
+      final file = File(image.path);
+      if (await _isImageTooDark(file) || !(await _hasEnoughBrownPixels(file))) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Please upload a clear, well‑lit photo of coffee beans.'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+        // Continue anyway; final decision will be made after model prediction
+      }
+
       // Process the image with API
-      await _processImage(File(image.path));
+      await _processImage(file);
       
     } catch (e) {
       debugPrint('Error taking picture: $e');
@@ -286,6 +302,27 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         // Convert the prediction data to BeanPrediction object
         final predictionData = testResult['data']['data']['prediction'];
         print('  - predictionData: $predictionData');
+
+        // Validate that the image looks like coffee beans
+        final predictedClass = (predictionData['predicted_class'] ?? '').toString();
+        final double predictedConfidence = (predictionData['confidence'] ?? 0.0).toDouble();
+        const knownBeans = ['Arabica', 'Robusta', 'Liberica', 'Excelsa'];
+        final bool isKnownBean = knownBeans.contains(predictedClass);
+        // Tighten acceptance; also use simple color heuristic (brown ratio)
+        final double brownRatio = await _estimateBrownRatio(imageFile);
+        final bool confidentEnough = predictedConfidence >= 0.75;
+        if (!(isKnownBean && confidentEnough) && brownRatio < 0.05) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Please upload a clear image of coffee beans.'),
+                backgroundColor: Colors.orange,
+                duration: Duration(seconds: 3),
+              ),
+            );
+          }
+          return;
+        }
         
         // Convert all_probabilities from list to map
         final probabilitiesList = predictionData['all_probabilities'] as List<dynamic>? ?? [];
@@ -298,12 +335,28 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         
         final beanPrediction = BeanPrediction(
           prediction: predictionData['predicted_class'] ?? '',
-          confidence: (predictionData['confidence'] ?? 0.0).toDouble(),
+          confidence: (predictionData['confidence'] ?? testResult['data']['data']['shelf_life']?['confidence_score'] ?? 0.0).toDouble(),
           allProbabilities: allProbabilities,
         );
         
         print('  - beanPrediction: $beanPrediction');
         
+        // Prefer the saved backend image URL from freshly created history
+        String imagePathToShow = imageFile.path;
+        try {
+          final int historyId = (testResult['data']['history_id'] as num).toInt();
+          final details = await ApiService.fetchHistoryDetails(historyId);
+          if (details['success'] == true) {
+            final imgUrl = details['data']?['image']?['image_url'];
+            if (imgUrl is String && imgUrl.isNotEmpty) {
+              imagePathToShow = imgUrl;
+            }
+          }
+        } catch (e) {
+          // Fallback to local path if details fetch fails
+          debugPrint('Could not fetch history details for image URL: $e');
+        }
+
         // Navigate to results page with both classification and defect detection
         print('🚀 About to navigate to ResultsPage...');
         if (mounted) {
@@ -314,8 +367,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                 prediction: beanPrediction,
                 defectDetection: testResult['data']['data']['defect_detection'],
                 shelfLife: testResult['data']['data']['shelf_life'],
-                beanCount: testResult['data']['data']['bean_count'],
-                imagePath: imageFile.path,
+                imagePath: imagePathToShow,
               ),
             ),
           );
@@ -357,6 +409,18 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       final XFile? image = await picker.pickImage(source: ImageSource.gallery);
       
       if (image != null) {
+        final file = File(image.path);
+        if (await _isImageTooDark(file) || !(await _hasEnoughBrownPixels(file))) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Please upload a clear, well‑lit photo of coffee beans.'),
+                backgroundColor: Colors.orange,
+              ),
+            );
+          }
+          // Continue to model prediction
+        }
         // Show loading indicator
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -369,7 +433,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         }
         
         // Process the image with API
-        await _processImage(File(image.path));
+        await _processImage(file);
       }
     } catch (e) {
       debugPrint('Error picking image: $e');
@@ -415,6 +479,92 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           ),
         );
       }
+    }
+  }
+
+  // Quick luminance check to reject completely dark/blank images
+  Future<bool> _isImageTooDark(File file) async {
+    try {
+      final bytes = await file.readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 32, targetHeight: 32);
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (byteData == null) return false;
+      final data = byteData.buffer.asUint8List();
+
+      int sumLuma = 0;
+      int count = 0;
+      for (int i = 0; i < data.length; i += 4) {
+        final r = data[i];
+        final g = data[i + 1];
+        final b = data[i + 2];
+        // Perceived luminance
+        final luma = (0.299 * r + 0.587 * g + 0.114 * b).round();
+        sumLuma += luma;
+        count++;
+      }
+      final avg = sumLuma / count;
+      return avg < 18; // very dark threshold
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Heuristic: require a minimum proportion of brownish pixels typical of roasted beans
+  Future<bool> _hasEnoughBrownPixels(File file) async {
+    try {
+      final bytes = await file.readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 48, targetHeight: 48);
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (byteData == null) return true; // don't block on failure
+      final data = byteData.buffer.asUint8List();
+
+      int brownish = 0;
+      int total = 0;
+      for (int i = 0; i < data.length; i += 4) {
+        final r = data[i].toDouble();
+        final g = data[i + 1].toDouble();
+        final b = data[i + 2].toDouble();
+        final brightness = (0.2126 * r + 0.7152 * g + 0.0722 * b);
+        // HSV-like heuristic: brown ~ low blue, moderate red/green, medium-low brightness
+        final isBrown = r > 60 && g > 40 && b < 80 && r >= g && brightness > 40 && brightness < 160;
+        if (isBrown) brownish++;
+        total++;
+      }
+      final ratio = brownish / total;
+      return ratio > 0.02; // minimal precheck; final gate uses _estimateBrownRatio
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<double> _estimateBrownRatio(File file) async {
+    try {
+      final bytes = await file.readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 96, targetHeight: 96);
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (byteData == null) return 0.0;
+      final data = byteData.buffer.asUint8List();
+
+      int brownish = 0;
+      int total = 0;
+      for (int i = 0; i < data.length; i += 4) {
+        final r = data[i].toDouble();
+        final g = data[i + 1].toDouble();
+        final b = data[i + 2].toDouble();
+        final brightness = (0.2126 * r + 0.7152 * g + 0.0722 * b);
+        final isBrown = r > 70 && g > 50 && b < 110 && r >= g && brightness > 35 && brightness < 200;
+        if (isBrown) brownish++;
+        total++;
+      }
+      return total == 0 ? 0.0 : brownish / total;
+    } catch (_) {
+      return 0.0;
     }
   }
 
@@ -554,7 +704,15 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
               color: Colors.white,
               size: AppConstants.mediumIconSize,
             ),
-            onPressed: () => Navigator.of(context).pop(),
+            onPressed: () {
+              if (widget.onClose != null) {
+                widget.onClose!();
+              } else {
+                if (Navigator.of(context).canPop()) {
+                  Navigator.of(context).pop();
+                }
+              }
+            },
           ),
         ],
       ),

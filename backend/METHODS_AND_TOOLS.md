@@ -23,7 +23,6 @@ The algorithm employs a hierarchical weighting system where each defect type is 
 
 ```python
 defect_weights = {
-    'mold': 10.0,           # Critical - immediate health risk
     'insect_damage': 8.0,   # High - quality degradation
     'quaker': 7.0,          # High - taste impact
     'discoloration': 6.0,   # Medium-High - visual quality
@@ -76,7 +75,6 @@ Predicted_Days = Base_Shelf_Life × (1 - Penalty_Factor)
 
 The algorithm applies hard constraints for critical defects:
 
-- **Mold Detection**: `Predicted_Days ≤ 2` (immediate health concern)
 - **Heavy Insect Damage**: `Predicted_Days ≤ 5` (if count > 2)
 
 ### 3. Confidence Assessment Metrics

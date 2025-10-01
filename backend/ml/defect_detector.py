@@ -198,7 +198,7 @@ class DefectDetectionService:
         # Penalty for specific defect types (severity)
         for detection in detections:
             defect_type = detection['defect_type']
-            if defect_type in ['insect_damage', 'mold']:
+            if defect_type in ['insect_damage']:
                 score -= 0.1  # High severity
             elif defect_type in ['quaker', 'under_roast']:
                 score -= 0.05  # Medium severity

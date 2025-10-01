@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+.Python
+.env
+.venv
+venv/
+ENV/
+
+# Data and cache
+# Keep models in image (required at runtime)
+# models/
+static/images/
+temp/
+*.log
+
+# Git
+.git
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+build/
+*.egg-info/
+
+# Notebooks
+*.ipynb
