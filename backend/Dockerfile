@@ -35,7 +35,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Copy app code
 COPY . /app
 
-# Expose port
+# Expose default port (Render sets PORT dynamically)
 EXPOSE 8000
 
 # Default environment
@@ -43,19 +43,20 @@ ENV API_HOST=0.0.0.0 \
     API_PORT=8000 \
     DEBUG=False
 
-# Healthcheck for container orchestrators
+# Healthcheck uses PORT if provided (fallback 8000)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import requests; import os; import sys;\
-import time;\
-import json;\
-import urllib.request as r;\
-u=f'http://127.0.0.1:{os.environ.get("API_PORT","8000")}/health';\
-req=r.Request(u);\
-req.add_header('User-Agent','healthcheck');\
-resp=r.urlopen(req, timeout=5);\
-import sys; sys.exit(0 if resp.getcode()==200 else 1)" || exit 1
+    CMD python - <<'PY' || exit 1
+import os, urllib.request, sys
+port = os.environ.get('PORT') or os.environ.get('API_PORT', '8000')
+url = f'http://127.0.0.1:{port}/health'
+try:
+    with urllib.request.urlopen(url, timeout=5) as r:
+        sys.exit(0 if r.getcode() == 200 else 1)
+except Exception:
+    sys.exit(1)
+PY
 
-# Run the app with uvicorn
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the app with uvicorn, binding to Render PORT when present
+CMD ["/bin/sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
 
