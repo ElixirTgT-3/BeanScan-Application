@@ -5,7 +5,8 @@ import '../utils/settings_service.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
+  final void Function(AppThemeMode mode)? onThemeChanged;
+  const SettingsPage({super.key, this.onThemeChanged});
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -238,10 +239,7 @@ class _SettingsPageState extends State<SettingsPage> {
     if (mode == null) return;
     await SettingsService.setThemeMode(mode);
     setState(() => _theme = mode);
-    // Notify root via navigator route arg callback if available
-    final state = context.findAncestorStateOfType<State>();
-    // Root wired via route: '/main' with onThemeChanged; we can trigger by
-    // simply reopening MainNavigationPage which will read saved preference.
+    widget.onThemeChanged?.call(mode);
   }
 
   Future<void> _openHelpCenter() async {

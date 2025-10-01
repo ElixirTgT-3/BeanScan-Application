@@ -186,7 +186,7 @@ class ApiService {
         final response = await http.get(
           Uri.parse('$url/health'),
           headers: {'Content-Type': 'application/json'},
-        ).timeout(const Duration(seconds: 3));
+        ).timeout(const Duration(seconds: 8));
         if (response.statusCode == 200) {
           _resolvedApiUrl = url;
           if (url != apiUrl) {
@@ -251,6 +251,20 @@ class ApiService {
     }
   }
 
+  static Future<http.StreamedResponse> _sendWithTimeoutAndRetry(http.MultipartRequest request, {int retries = 1, Duration timeout = const Duration(seconds: 60)}) async {
+    int attempt = 0;
+    while (true) {
+      attempt += 1;
+      try {
+        final streamed = await request.send().timeout(timeout);
+        return streamed;
+      } catch (e) {
+        if (attempt > retries) rethrow;
+        await Future.delayed(Duration(seconds: 2 * attempt));
+      }
+    }
+  }
+
   /// Scan bean image with both classification and defect detection
   static Future<Map<String, dynamic>> scanBeanImage(File imageFile) async {
     try {
@@ -283,8 +297,8 @@ class ApiService {
         request.fields['device_id'] = deviceId;
       }
 
-      // Send the request
-      final streamedResponse = await request.send();
+      // Send the request with timeout and single retry to mitigate cold starts/502
+      final streamedResponse = await _sendWithTimeoutAndRetry(request, retries: 1, timeout: const Duration(seconds: 90));
       final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
@@ -326,8 +340,8 @@ class ApiService {
         ),
       );
 
-      // Send the request
-      final streamedResponse = await request.send();
+      // Send the request with timeout
+      final streamedResponse = await _sendWithTimeoutAndRetry(request, retries: 1, timeout: const Duration(seconds: 60));
       final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
@@ -408,8 +422,7 @@ class ApiService {
         request.fields['device_id'] = deviceId;
       }
 
-      // Send the request
-      final streamedResponse = await request.send();
+      final streamedResponse = await _sendWithTimeoutAndRetry(request, retries: 1, timeout: const Duration(seconds: 90));
       final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
@@ -441,7 +454,6 @@ class ApiService {
       await checkHealth();
       final deviceId = await _getDeviceId();
       final url = Uri.parse('$apiUrl/api/v1/history?device_id=${Uri.encodeComponent(deviceId ?? '')}&limit=$limit&offset=$offset');
-      // Debug: print URL
       // ignore: avoid_print
       print('Fetching history: GET ' + url.toString());
       final response = await http.get(url).timeout(const Duration(seconds: 10));

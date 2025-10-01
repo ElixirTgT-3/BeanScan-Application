@@ -7,7 +7,10 @@ import 'utils/app_colors.dart';
 import 'utils/app_constants.dart';
 import 'utils/settings_service.dart';
 
-void main() => runApp(const BeanScanApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const BeanScanApp());
+}
 
 class BeanScanApp extends StatefulWidget {
   const BeanScanApp({super.key});
@@ -82,7 +85,7 @@ class _MainNavigationPageState extends State<MainNavigationPage> {
       ScanPage(
         onClose: () => setState(() => currentPageIndex = 0),
       ),
-      const SettingsPage(),
+      SettingsPage(onThemeChanged: widget.onThemeChanged),
     ];
 
     return Scaffold(
