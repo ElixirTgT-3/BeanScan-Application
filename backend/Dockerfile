@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpng16-16 \
         libopencv-core-dev \
         libopencv-imgproc-dev \
+        curl \
         git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -45,16 +46,7 @@ ENV API_HOST=0.0.0.0 \
 
 # Healthcheck uses PORT if provided (fallback 8000)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python - <<'PY' || exit 1
-import os, urllib.request, sys
-port = os.environ.get('PORT') or os.environ.get('API_PORT', '8000')
-url = f'http://127.0.0.1:{port}/health'
-try:
-    with urllib.request.urlopen(url, timeout=5) as r:
-        sys.exit(0 if r.getcode() == 200 else 1)
-except Exception:
-    sys.exit(1)
-PY
+    CMD curl -fsS http://127.0.0.1:${PORT:-${API_PORT:-8000}}/health || exit 1
 
 # Run the app with uvicorn, binding to Render PORT when present
 CMD ["/bin/sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
