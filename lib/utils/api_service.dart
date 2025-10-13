@@ -440,10 +440,13 @@ class ApiService {
       // Ensure base URL is reachable and resolved
       await checkHealth();
       final deviceId = await _getDeviceId();
+      print('=== HISTORY FETCH DEBUG ===');
+      print('Device ID for history: $deviceId');
       final url = Uri.parse('$apiUrl/api/v1/history?device_id=${Uri.encodeComponent(deviceId ?? '')}&limit=$limit&offset=$offset');
       // Debug: print URL
       // ignore: avoid_print
       print('Fetching history: GET ' + url.toString());
+      print('=== END HISTORY DEBUG ===');
       final response = await http.get(url).timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         return {'success': true, 'data': json.decode(response.body)};
@@ -482,7 +485,10 @@ class ApiService {
   static String? _cachedDeviceId;
   static Future<String?> _getDeviceId() async {
     try {
-      if (_cachedDeviceId != null) return _cachedDeviceId;
+      if (_cachedDeviceId != null) {
+        print('Using cached device ID: $_cachedDeviceId');
+        return _cachedDeviceId;
+      }
       // Use a simple on-disk GUID stored in app documents directory
       final dir = await _getAppDir();
       final file = File('${dir.path}/beanscan_device_id.txt');
@@ -490,15 +496,64 @@ class ApiService {
         final id = (await file.readAsString()).trim();
         if (id.isNotEmpty) {
           _cachedDeviceId = id;
+          print('Loaded existing device ID: $id');
           return id;
         }
       }
       final newId = _generateGuid();
       await file.writeAsString(newId, flush: true);
       _cachedDeviceId = newId;
+      print('Generated new device ID: $newId');
       return newId;
-    } catch (_) {
+    } catch (e) {
+      print('Error getting device ID: $e');
       return null;
+    }
+  }
+
+  // Force regenerate device ID (useful for testing or when switching devices)
+  static Future<String?> regenerateDeviceId() async {
+    try {
+      final dir = await _getAppDir();
+      final file = File('${dir.path}/beanscan_device_id.txt');
+      final newId = _generateGuid();
+      await file.writeAsString(newId, flush: true);
+      _cachedDeviceId = newId;
+      print('Force regenerated device ID: $newId');
+      return newId;
+    } catch (e) {
+      print('Error regenerating device ID: $e');
+      return null;
+    }
+  }
+
+  // Test function to check if backend is working and create a test user
+  static Future<Map<String, dynamic>> testBackendConnection() async {
+    try {
+      final deviceId = await _getDeviceId();
+      print('=== BACKEND CONNECTION TEST ===');
+      print('Device ID: $deviceId');
+      
+      // Test health endpoint
+      final healthResult = await checkHealth();
+      print('Health check: $healthResult');
+      
+      // Test history endpoint
+      final historyResult = await fetchHistory(limit: 5);
+      print('History test result: $historyResult');
+      
+      return {
+        'success': true,
+        'device_id': deviceId,
+        'health_check': healthResult,
+        'history_test': historyResult
+      };
+    } catch (e) {
+      print('Backend connection test failed: $e');
+      return {
+        'success': false,
+        'error': e.toString()
+      };
     }
   }
 

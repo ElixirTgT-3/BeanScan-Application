@@ -1,0 +1,428 @@
+{
+  "scans": [
+    {
+      "device_id": "test123",
+      "bean_type_name": "Arabica",
+      "confidence_score": 0.85,
+      "local_id": 1,
+      "saved_at": "2025-10-11T10:49:51.027978"
+    },
+    {
+      "device_id": null,
+      "user_id": null,
+      "image_id": null,
+      "bean_type_id": null,
+      "defect_id": null,
+      "shelf_life_id": null,
+      "image_url": "/images/7103b209-c6bf-45e9-b7e9-69932f8badce.jpg",
+      "bean_type_name": "Arabica",
+      "healthy_percent": 58.219438791275024,
+      "defective_percent": 41.780561208724976,
+      "confidence_score": 0.5821943879127502,
+      "created_at": "2025-10-11T10:50:04.481585",
+      "prediction": {
+        "predicted_class": "Arabica",
+        "confidence": 0.5821943879127502,
+        "all_probabilities": [
+          0.5821943879127502,
+          0.09325405955314636,
+          0.3209996521472931,
+          0.0035518149379640818
+        ]
+      },
+      "defect_detection": {
+        "detections": [],
+        "summary": {
+          "total_defects": 0,
+          "defect_types": {},
+          "defect_percentage": 0.0,
+          "quality_score": 58.219438791275024,
+          "quality_grade": "C+"
+        }
+      },
+      "shelf_life_prediction": {
+        "predicted_days": 30,
+        "category": "Excellent",
+        "confidence": 0.7,
+        "raw_prediction": 30,
+        "defect_score": 0,
+        "defect_counts": {},
+        "base_shelf_life": 30
+      },
+      "health_score": {
+        "score": 0.5821943879127502,
+        "percentage": 58.219438791275024,
+        "grade": "C+",
+        "defect_count": 0
+      },
+      "local_id": 2,
+      "saved_at": "2025-10-11T10:50:04.481939"
+    },
+    {
+      "device_id": null,
+      "user_id": null,
+      "image_id": null,
+      "bean_type_id": null,
+      "defect_id": null,
+      "shelf_life_id": null,
+      "image_url": "/images/4cdedcca-0f7a-4682-985f-1990004a6b68.jpg",
+      "bean_type_name": "Liberica",
+      "healthy_percent": 47.597212600708005,
+      "defective_percent": 52.402787399291995,
+      "confidence_score": 0.7176861763000488,
+      "created_at": "2025-10-11T10:50:59.268389",
+      "prediction": {
+        "predicted_class": "Liberica",
+        "confidence": 0.7176861763000488,
+        "all_probabilities": [
+          0.26319360733032227,
+          0.012456763535737991,
+          0.7176861763000488,
+          0.006663414184004068
+        ]
+      },
+      "defect_detection": {
+        "detections": [
+          {
+            "bbox": [
+              71.9149169921875,
+              7.9896697998046875,
+              97.89594268798828,
+              29.274320602416992
+            ],
+            "confidence": 0.715288519859314,
+            "defect_type": "roasted-beans",
+            "area": 552.9970703125,
+            "coordinates": {
+              "x1": 71.9149169921875,
+              "y1": 7.9896697998046875,
+              "x2": 97.89594268798828,
+              "y2": 29.274320602416992
+            }
+          },
+          {
+            "bbox": [
+              13.918865203857422,
+              64.31045532226562,
+              43.41121292114258,
+              93.76119995117188
+            ],
+            "confidence": 0.5797628164291382,
+            "defect_type": "roasted-beans",
+            "area": 868.5715942382812,
+            "coordinates": {
+              "x1": 13.918865203857422,
+              "y1": 64.31045532226562,
+              "x2": 43.41121292114258,
+              "y2": 93.76119995117188
+            }
+          },
+          {
+            "bbox": [
+              178.52305603027344,
+              91.71229553222656,
+              213.0062255859375,
+              120.58353424072266
+            ],
+            "confidence": 0.5410943627357483,
+            "defect_type": "roasted-beans",
+            "area": 995.5718383789062,
+            "coordinates": {
+              "x1": 178.52305603027344,
+              "y1": 91.71229553222656,
+              "x2": 213.0062255859375,
+              "y2": 120.58353424072266
+            }
+          }
+        ],
+        "summary": {
+          "total_defects": 3,
+          "defect_types": {},
+          "defect_percentage": 0.0,
+          "quality_score": 47.597212600708005,
+          "quality_grade": "C"
+        }
+      },
+      "shelf_life_prediction": {
+        "predicted_days": 26,
+        "category": "Excellent",
+        "confidence": 0.7,
+        "raw_prediction": 26.97175840854645,
+        "defect_score": 1.8361456990242004,
+        "defect_counts": {
+          "unknown": 3
+        },
+        "base_shelf_life": 28
+      },
+      "health_score": {
+        "score": 0.47597212600708005,
+        "percentage": 47.597212600708005,
+        "grade": "C",
+        "defect_count": 3
+      },
+      "local_id": 3,
+      "saved_at": "2025-10-11T10:50:59.270016"
+    },
+    {
+      "device_id": null,
+      "user_id": null,
+      "image_id": null,
+      "bean_type_id": null,
+      "defect_id": null,
+      "shelf_life_id": null,
+      "image_url": "/images/8558fbfa-9318-426f-a97c-08c3bb851c36.jpg",
+      "bean_type_name": "Robusta",
+      "healthy_percent": 100.0,
+      "defective_percent": 0.0,
+      "confidence_score": 1.0,
+      "created_at": "2025-10-11T10:52:31.978665",
+      "prediction": {
+        "predicted_class": "Robusta",
+        "confidence": 1.0,
+        "all_probabilities": [
+          2.769330251228499e-20,
+          1.0,
+          4.0386866847049597e-23,
+          6.457567249623984e-24
+        ]
+      },
+      "defect_detection": {
+        "detections": [],
+        "summary": {
+          "total_defects": 0,
+          "defect_types": {},
+          "defect_percentage": 0.0,
+          "quality_score": 100.0,
+          "quality_grade": "A+"
+        }
+      },
+      "shelf_life_prediction": {
+        "predicted_days": 25,
+        "category": "Excellent",
+        "confidence": 0.7,
+        "raw_prediction": 25,
+        "defect_score": 0,
+        "defect_counts": {},
+        "base_shelf_life": 25
+      },
+      "health_score": {
+        "score": 1.0,
+        "percentage": 100.0,
+        "grade": "A+",
+        "defect_count": 0
+      },
+      "local_id": 4,
+      "saved_at": "2025-10-11T10:52:31.979761"
+    },
+    {
+      "device_id": null,
+      "user_id": null,
+      "image_id": null,
+      "bean_type_id": null,
+      "defect_id": null,
+      "shelf_life_id": null,
+      "image_url": "/images/f9af7cba-ff80-46a9-a9d5-d06a6cdcd184.jpg",
+      "bean_type_name": "Liberica",
+      "healthy_percent": 47.597212600708005,
+      "defective_percent": 52.402787399291995,
+      "confidence_score": 0.7176861763000488,
+      "created_at": "2025-10-11T10:52:36.991763",
+      "prediction": {
+        "predicted_class": "Liberica",
+        "confidence": 0.7176861763000488,
+        "all_probabilities": [
+          0.26319360733032227,
+          0.012456763535737991,
+          0.7176861763000488,
+          0.006663414184004068
+        ]
+      },
+      "defect_detection": {
+        "detections": [
+          {
+            "bbox": [
+              71.9149169921875,
+              7.9896697998046875,
+              97.89594268798828,
+              29.274320602416992
+            ],
+            "confidence": 0.715288519859314,
+            "defect_type": "roasted-beans",
+            "area": 552.9970703125,
+            "coordinates": {
+              "x1": 71.9149169921875,
+              "y1": 7.9896697998046875,
+              "x2": 97.89594268798828,
+              "y2": 29.274320602416992
+            }
+          },
+          {
+            "bbox": [
+              13.918865203857422,
+              64.31045532226562,
+              43.41121292114258,
+              93.76119995117188
+            ],
+            "confidence": 0.5797628164291382,
+            "defect_type": "roasted-beans",
+            "area": 868.5715942382812,
+            "coordinates": {
+              "x1": 13.918865203857422,
+              "y1": 64.31045532226562,
+              "x2": 43.41121292114258,
+              "y2": 93.76119995117188
+            }
+          },
+          {
+            "bbox": [
+              178.52305603027344,
+              91.71229553222656,
+              213.0062255859375,
+              120.58353424072266
+            ],
+            "confidence": 0.5410943627357483,
+            "defect_type": "roasted-beans",
+            "area": 995.5718383789062,
+            "coordinates": {
+              "x1": 178.52305603027344,
+              "y1": 91.71229553222656,
+              "x2": 213.0062255859375,
+              "y2": 120.58353424072266
+            }
+          }
+        ],
+        "summary": {
+          "total_defects": 3,
+          "defect_types": {},
+          "defect_percentage": 0.0,
+          "quality_score": 47.597212600708005,
+          "quality_grade": "C"
+        }
+      },
+      "shelf_life_prediction": {
+        "predicted_days": 26,
+        "category": "Excellent",
+        "confidence": 0.7,
+        "raw_prediction": 26.97175840854645,
+        "defect_score": 1.8361456990242004,
+        "defect_counts": {
+          "unknown": 3
+        },
+        "base_shelf_life": 28
+      },
+      "health_score": {
+        "score": 0.47597212600708005,
+        "percentage": 47.597212600708005,
+        "grade": "C",
+        "defect_count": 3
+      },
+      "local_id": 5,
+      "saved_at": "2025-10-11T10:52:37.009333"
+    },
+    {
+      "device_id": null,
+      "user_id": null,
+      "image_id": null,
+      "bean_type_id": null,
+      "defect_id": null,
+      "shelf_life_id": null,
+      "image_url": "/images/b772774d-e049-48eb-92dc-3295cb121506.jpg",
+      "bean_type_name": "Liberica",
+      "healthy_percent": 47.597212600708005,
+      "defective_percent": 52.402787399291995,
+      "confidence_score": 0.7176861763000488,
+      "created_at": "2025-10-11T10:52:54.885012",
+      "prediction": {
+        "predicted_class": "Liberica",
+        "confidence": 0.7176861763000488,
+        "all_probabilities": [
+          0.26319360733032227,
+          0.012456763535737991,
+          0.7176861763000488,
+          0.006663414184004068
+        ]
+      },
+      "defect_detection": {
+        "detections": [
+          {
+            "bbox": [
+              71.9149169921875,
+              7.9896697998046875,
+              97.89594268798828,
+              29.274320602416992
+            ],
+            "confidence": 0.715288519859314,
+            "defect_type": "roasted-beans",
+            "area": 552.9970703125,
+            "coordinates": {
+              "x1": 71.9149169921875,
+              "y1": 7.9896697998046875,
+              "x2": 97.89594268798828,
+              "y2": 29.274320602416992
+            }
+          },
+          {
+            "bbox": [
+              13.918865203857422,
+              64.31045532226562,
+              43.41121292114258,
+              93.76119995117188
+            ],
+            "confidence": 0.5797628164291382,
+            "defect_type": "roasted-beans",
+            "area": 868.5715942382812,
+            "coordinates": {
+              "x1": 13.918865203857422,
+              "y1": 64.31045532226562,
+              "x2": 43.41121292114258,
+              "y2": 93.76119995117188
+            }
+          },
+          {
+            "bbox": [
+              178.52305603027344,
+              91.71229553222656,
+              213.0062255859375,
+              120.58353424072266
+            ],
+            "confidence": 0.5410943627357483,
+            "defect_type": "roasted-beans",
+            "area": 995.5718383789062,
+            "coordinates": {
+              "x1": 178.52305603027344,
+              "y1": 91.71229553222656,
+              "x2": 213.0062255859375,
+              "y2": 120.58353424072266
+            }
+          }
+        ],
+        "summary": {
+          "total_defects": 3,
+          "defect_types": {},
+          "defect_percentage": 0.0,
+          "quality_score": 47.597212600708005,
+          "quality_grade": "C"
+        }
+      },
+      "shelf_life_prediction": {
+        "predicted_days": 26,
+        "category": "Excellent",
+        "confidence": 0.7,
+        "raw_prediction": 26.97175840854645,
+        "defect_score": 1.8361456990242004,
+        "defect_counts": {
+          "unknown": 3
+        },
+        "base_shelf_life": 28
+      },
+      "health_score": {
+        "score": 0.47597212600708005,
+        "percentage": 47.597212600708005,
+        "grade": "C",
+        "defect_count": 3
+      },
+      "local_id": 6,
+      "saved_at": "2025-10-11T10:52:54.913807"
+    }
+  ]
+}

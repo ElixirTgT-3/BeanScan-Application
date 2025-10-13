@@ -29,8 +29,8 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Don't check permissions automatically - let user trigger it
-    debugPrint('ScanPage initialized - waiting for user to request permissions');
+    // Check permissions immediately on initialization
+    _checkPermissionsOnInit();
   }
 
   @override
@@ -48,7 +48,39 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       }
     } else if (state == AppLifecycleState.resumed) {
       // Check permissions again when app resumes (user might have changed them in settings)
-      _checkPermissions();
+      _checkPermissionsOnInit();
+    }
+  }
+
+  Future<void> _checkPermissionsOnInit() async {
+    try {
+      debugPrint('=== Checking permissions on initialization ===');
+      
+      // Check current permission status without requesting
+      PermissionStatus cameraStatus = await Permission.camera.status;
+      PermissionStatus storageStatus = await Permission.storage.status;
+      
+      debugPrint('Initial camera permission status: $cameraStatus');
+      debugPrint('Initial storage permission status: $storageStatus');
+      
+      // If permissions are already granted, initialize camera immediately
+      if (cameraStatus.isGranted && storageStatus.isGranted) {
+        debugPrint('All permissions already granted, initializing camera...');
+        setState(() {
+          _isPermissionGranted = true;
+        });
+        _initializeCamera();
+      } else {
+        debugPrint('Permissions not granted, showing permission request UI');
+        setState(() {
+          _isPermissionGranted = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error checking permissions on init: $e');
+      setState(() {
+        _isPermissionGranted = false;
+      });
     }
   }
 
@@ -182,6 +214,16 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     }
 
     try {
+      // Ensure flash is used if it's supposed to be on
+      if (_isFlashOn) {
+        debugPrint('Taking picture with flash ON');
+        await _cameraController!.setFlashMode(FlashMode.torch);
+        await Future.delayed(const Duration(milliseconds: 300)); // Longer delay for flash to activate
+      } else {
+        debugPrint('Taking picture with flash OFF');
+        await _cameraController!.setFlashMode(FlashMode.off);
+      }
+      
       final XFile image = await _cameraController!.takePicture();
       debugPrint('Picture taken: ${image.path}');
       
@@ -240,14 +282,41 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     }
 
     try {
-      await _cameraController!.setFlashMode(
-        _isFlashOn ? FlashMode.off : FlashMode.torch,
-      );
+      final newFlashMode = _isFlashOn ? FlashMode.off : FlashMode.torch;
+      debugPrint('Toggling flash from ${_isFlashOn ? 'on' : 'off'} to ${newFlashMode == FlashMode.torch ? 'on' : 'off'}');
+      
+      await _cameraController!.setFlashMode(newFlashMode);
+      
+      // Wait for flash mode to be set
+      await Future.delayed(const Duration(milliseconds: 200));
+      
       setState(() {
         _isFlashOn = !_isFlashOn;
       });
+      
+      debugPrint('Flash toggled successfully: $_isFlashOn');
+      
+      // Show user feedback
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_isFlashOn ? 'Flash turned ON' : 'Flash turned OFF'),
+            backgroundColor: _isFlashOn ? Colors.green : Colors.grey,
+            duration: const Duration(seconds: 1),
+          ),
+        );
+      }
     } catch (e) {
       debugPrint('Error toggling flash: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Flash not supported: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
     }
   }
 
@@ -333,35 +402,39 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           allProbabilities[beanTypes[i]] = (probabilitiesList[i] as num).toDouble();
         }
         
+        final healthScoreData = testResult['data']['data']['health_score'];
+        final double healthScorePercentage = (healthScoreData?['percentage'] as num?)?.toDouble() ?? 0.0;
+        final double derivedConfidence = ((healthScorePercentage / 100).clamp(0.0, 1.0)).toDouble();
+
         final beanPrediction = BeanPrediction(
           prediction: predictionData['predicted_class'] ?? '',
-          confidence: (predictionData['confidence'] ?? testResult['data']['data']['shelf_life']?['confidence_score'] ?? 0.0).toDouble(),
+          confidence: derivedConfidence > 0
+              ? derivedConfidence
+              : (predictionData['confidence'] ?? testResult['data']['data']['shelf_life']?['confidence_score'] ?? 0.0).toDouble(),
           allProbabilities: allProbabilities,
         );
         
         print('  - beanPrediction: $beanPrediction');
         
-        // Prefer the saved backend image URL from freshly created history
-        String imagePathToShow = imageFile.path;
+        // Use the image URL directly from the scan response
+        String imagePathToShow = imageFile.path; // Fallback to local file
         try {
-          final int historyId = (testResult['data']['history_id'] as num).toInt();
-          final details = await ApiService.fetchHistoryDetails(historyId);
-          if (details['success'] == true) {
-            final imgUrl = details['data']?['image']?['image_url'];
-            if (imgUrl is String && imgUrl.isNotEmpty) {
-              imagePathToShow = imgUrl;
-            }
+          final imageUrl = testResult['data']['image_url'];
+          if (imageUrl is String && imageUrl.isNotEmpty) {
+            imagePathToShow = imageUrl;
+            print('Using backend image URL: $imagePathToShow');
+          } else {
+            print('No image URL in response, using local file: $imagePathToShow');
           }
         } catch (e) {
-          // Fallback to local path if details fetch fails
-          debugPrint('Could not fetch history details for image URL: $e');
+          print('Could not get image URL from response: $e');
         }
 
         // Navigate to results page with both classification and defect detection
         print('🚀 About to navigate to ResultsPage...');
         if (mounted) {
           print('🚀 Navigating to ResultsPage...');
-          Navigator.of(context).push(
+          final result = await Navigator.of(context).push<ResultsNavigationAction?>(
             MaterialPageRoute(
               builder: (context) => ResultsPage(
                 prediction: beanPrediction,
@@ -371,7 +444,17 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
               ),
             ),
           );
-          print('🚀 Navigation completed!');
+          print('🚀 Navigation completed with result: $result');
+          if (!mounted) {
+            return;
+          }
+          if (result == ResultsNavigationAction.history) {
+            if (widget.onClose != null) {
+              widget.onClose!();
+            } else if (Navigator.of(context).canPop()) {
+              Navigator.of(context).pop();
+            }
+          }
         } else {
           print('❌ Widget not mounted, cannot navigate');
         }
@@ -581,11 +664,11 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           children: [
             _buildHeader(context),
             _buildTitleAndInstructions(),
-            const SizedBox(height: AppConstants.extraLargeSpacing),
+            const SizedBox(height: 12), // Balanced spacing
             _buildCameraViewfinder(),
-            const SizedBox(height: AppConstants.largeSpacing),
+            const SizedBox(height: 12), // Balanced spacing
             _buildUploadButton(),
-            const SizedBox(height: AppConstants.largeSpacing),
+            const SizedBox(height: 8), // Smaller spacing before controls
             _buildCameraControls(),
           ],
         ),
@@ -694,25 +777,36 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
   Widget _buildHeader(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: AppConstants.largePadding, vertical: AppConstants.mediumSpacing),
+      padding: const EdgeInsets.only(
+        left: AppConstants.largePadding,
+        right: AppConstants.largePadding,
+        top: 12,
+        bottom: 8,
+      ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
-          IconButton(
-            icon: const Icon(
-              Icons.close,
-              color: Colors.white,
-              size: AppConstants.mediumIconSize,
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.black26,
+              borderRadius: BorderRadius.circular(20),
             ),
-            onPressed: () {
-              if (widget.onClose != null) {
-                widget.onClose!();
-              } else {
-                if (Navigator.of(context).canPop()) {
-                  Navigator.of(context).pop();
+            child: IconButton(
+              icon: const Icon(
+                Icons.close,
+                color: Colors.white,
+                size: 20,
+              ),
+              onPressed: () {
+                if (widget.onClose != null) {
+                  widget.onClose!();
+                } else {
+                  if (Navigator.of(context).canPop()) {
+                    Navigator.of(context).pop();
+                  }
                 }
-              }
-            },
+              },
+            ),
           ),
         ],
       ),
@@ -720,28 +814,31 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   }
 
   Widget _buildTitleAndInstructions() {
-    return const Padding(
-      padding: EdgeInsets.symmetric(horizontal: AppConstants.largePadding),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AppConstants.largePadding),
       child: Column(
         children: [
-          Text(
+          const Text(
             "Bean Scanner & Defect Detector",
             style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
+              fontSize: 22,
+              fontWeight: FontWeight.w600,
               color: Colors.white,
+              letterSpacing: 0.5,
             ),
             textAlign: TextAlign.center,
           ),
-          SizedBox(height: AppConstants.smallSpacing),
-          Text(
+          const SizedBox(height: 6),
+          const Text(
             "Point your camera at coffee beans to identify their type and detect defects (insect damage, quaker, shell, etc.).",
             style: TextStyle(
-              fontSize: 14,
+              fontSize: 13,
               color: Colors.white70,
+              height: 1.4,
             ),
             textAlign: TextAlign.center,
           ),
+          const SizedBox(height: 4),
         ],
       ),
     );
@@ -749,35 +846,17 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
   Widget _buildCameraViewfinder() {
     return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: AppConstants.largePadding),
-        child: AspectRatio(
-          aspectRatio: 1.0, // Force a square viewfinder
-          child: Container(
-            decoration: BoxDecoration(
-              border: Border.all(
-                color: AppColors.primaryBrown,
-                width: AppConstants.mediumBorder,
-                style: BorderStyle.solid,
-              ),
-              borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
-                    _buildSquareCameraPreview()
-                  else
-                    _buildCameraPlaceholder(),
-                  if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
-                    _buildCornerBrackets(),
-                ],
-              ),
-            ),
-          ),
-        ),
+      flex: 4, // Increased from 3 to 4 for more height
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
+            _buildFullCameraPreview()
+          else
+            _buildCameraPlaceholder(),
+          if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
+            _buildCornerBrackets(),
+        ],
       ),
     );
   }
@@ -788,7 +867,6 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       height: double.infinity,
       decoration: BoxDecoration(
         color: Colors.grey[200],
-        borderRadius: BorderRadius.circular(AppConstants.smallRadius),
       ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -816,27 +894,8 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildSquareCameraPreview() {
-    final previewSize = _cameraController!.value.previewSize;
-    if (previewSize == null) {
-      return CameraPreview(_cameraController!);
-    }
-
-    final double previewWidth = previewSize.width;
-    final double previewHeight = previewSize.height;
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        return FittedBox(
-          fit: BoxFit.cover, // Cover the square and crop excess
-          child: SizedBox(
-            width: previewWidth,
-            height: previewHeight,
-            child: CameraPreview(_cameraController!),
-          ),
-        );
-      },
-    );
+  Widget _buildFullCameraPreview() {
+    return CameraPreview(_cameraController!);
   }
 
   Widget _buildCornerBrackets() {
@@ -914,27 +973,35 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         onTap: _pickImageFromGallery,
         child: Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: AppConstants.mediumSpacing, horizontal: AppConstants.largePadding),
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(AppConstants.extraLargeRadius),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.1),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
+              Icon(
+                Icons.photo_library_outlined,
+                color: AppColors.textDarkGrey,
+                size: 18,
+              ),
+              const SizedBox(width: 8),
               const Text(
                 "Upload From Gallery",
                 style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500,
                   color: AppColors.textDarkGrey,
+                  letterSpacing: 0.3,
                 ),
-              ),
-              const SizedBox(width: AppConstants.smallSpacing),
-              Icon(
-                Icons.upload,
-                color: AppColors.textDarkGrey,
-                size: AppConstants.smallIconSize,
               ),
             ],
           ),
@@ -945,51 +1012,76 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
   Widget _buildCameraControls() {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: AppConstants.largePadding, vertical: AppConstants.mediumSpacing),
+      padding: const EdgeInsets.only(
+        left: AppConstants.largePadding,
+        right: AppConstants.largePadding,
+        top: 12,
+        bottom: 16,
+      ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
           // Flash control
-          IconButton(
-            icon: Icon(
-              _isFlashOn ? Icons.flash_on : Icons.flash_off,
-              color: Colors.white,
-              size: AppConstants.mediumIconSize,
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.black26,
+              borderRadius: BorderRadius.circular(25),
             ),
-            onPressed: _isCameraInitialized ? _toggleFlash : null,
+            child: IconButton(
+              icon: Icon(
+                _isFlashOn ? Icons.flash_on : Icons.flash_off,
+                color: _isFlashOn ? Colors.amber : Colors.white,
+                size: 24,
+              ),
+              onPressed: _isCameraInitialized ? _toggleFlash : null,
+            ),
           ),
           
           // Shutter button
           GestureDetector(
             onTap: _isCameraInitialized ? _takePicture : null,
             child: Container(
-              width: AppConstants.shutterButtonSize,
-              height: AppConstants.shutterButtonSize,
+              width: 70,
+              height: 70,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
+                color: Colors.white.withOpacity(0.2),
                 border: Border.all(
                   color: Colors.white,
-                  width: AppConstants.thickBorder,
+                  width: 3,
                 ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.3),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
               child: const Center(
                 child: Icon(
-                  Icons.camera,
+                  Icons.camera_alt,
                   color: Colors.white,
-                  size: AppConstants.largeIconSize,
+                  size: 32,
                 ),
               ),
             ),
           ),
           
           // Camera switch
-          IconButton(
-            icon: const Icon(
-              Icons.flip_camera_ios,
-              color: Colors.white,
-              size: AppConstants.mediumIconSize,
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.black26,
+              borderRadius: BorderRadius.circular(25),
             ),
-            onPressed: _isCameraInitialized && _cameras.length > 1 ? _switchCamera : null,
+            child: IconButton(
+              icon: const Icon(
+                Icons.flip_camera_ios,
+                color: Colors.white,
+                size: 24,
+              ),
+              onPressed: _isCameraInitialized && _cameras.length > 1 ? _switchCamera : null,
+            ),
           ),
         ],
       ),

@@ -212,22 +212,9 @@ pytest
 pytest --cov=.
 ```
 
-## 🚀 Deployment
+## ⚙️ Environment Variables
 
-### Docker
-
-```dockerfile
-FROM python:3.9-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-### Environment Variables
-
-Ensure all required environment variables are set in production:
+Ensure the required environment variables are set in your local `.env`:
 - Database credentials
 - API configuration
 - Model paths
@@ -260,4 +247,4 @@ For issues and questions:
 - [ ] Advanced analytics
 - [ ] Multi-language support
 - [ ] Mobile app integration
-- [ ] Cloud deployment scripts
+

@@ -20,15 +20,34 @@ async def get_scan_history(
     Get scan history with optional filtering
     """
     try:
+        print(f"[DEBUG] History request - device_id: {device_id}, user_id: {user_id}")
+        
         # Resolve user by device_id if provided and user_id is not
         resolved_user_id = user_id
         if device_id and not user_id:
             try:
+                print(f"[DEBUG] Looking up user by device_id: {device_id}")
                 user_lookup = supabase.table(USER_TABLE).select("user_id").eq("Name", device_id).limit(1).execute()
+                print(f"[DEBUG] User lookup result: {user_lookup.data}")
                 if user_lookup.data:
                     resolved_user_id = user_lookup.data[0]["user_id"]
-            except Exception:
+                    print(f"[DEBUG] Resolved user_id: {resolved_user_id}")
+                else:
+                    print(f"[DEBUG] No user found for device_id: {device_id}")
+                    # If no user found, this might be a new device - return empty for now
+                    # The user will be created when they do their first scan
+                    return JSONResponse(content={
+                        "scans": [],
+                        "total": 0,
+                        "limit": limit,
+                        "offset": offset,
+                        "message": "No history found for this device. Scan a bean to create your first record."
+                    })
+            except Exception as e:
+                print(f"[DEBUG] Error during user lookup: {e}")
                 resolved_user_id = user_id
+
+        print(f"[DEBUG] Final resolved_user_id: {resolved_user_id}")
 
         # Build query
         query = supabase.table(HISTORY_TABLE).select("*")
@@ -36,6 +55,9 @@ async def get_scan_history(
         # Apply filters
         if resolved_user_id:
             query = query.eq("user_id", resolved_user_id)
+            print(f"[DEBUG] Filtering by user_id: {resolved_user_id}")
+        else:
+            print(f"[DEBUG] No user_id filter applied - returning all records")
         
         if start_date:
             query = query.gte("created_at", start_date)

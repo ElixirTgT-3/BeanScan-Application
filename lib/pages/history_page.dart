@@ -4,8 +4,32 @@ import '../utils/app_constants.dart';
 import '../utils/api_service.dart';
 import 'results_page.dart';
 
+class HistoryPageController {
+  _HistoryPageState? _state;
+
+  void _attach(_HistoryPageState state) {
+    _state = state;
+  }
+
+  void _detach(_HistoryPageState state) {
+    if (identical(_state, state)) {
+      _state = null;
+    }
+  }
+
+  Future<void> refresh({bool showLoadingIndicator = false}) {
+    final state = _state;
+    if (state == null) {
+      return Future.value();
+    }
+    return state._loadHistory(showLoadingIndicator: showLoadingIndicator);
+  }
+}
+
 class HistoryPage extends StatefulWidget {
-  const HistoryPage({super.key});
+  const HistoryPage({super.key, this.controller});
+
+  final HistoryPageController? controller;
 
   @override
   State<HistoryPage> createState() => _HistoryPageState();
@@ -18,18 +42,46 @@ class _HistoryPageState extends State<HistoryPage> {
   @override
   void initState() {
     super.initState();
+    widget.controller?._attach(this);
     _loadHistory();
   }
 
-  Future<void> _loadHistory() async {
+  @override
+  void didUpdateWidget(covariant HistoryPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.controller, widget.controller)) {
+      oldWidget.controller?._detach(this);
+      widget.controller?._attach(this);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller?._detach(this);
+    super.dispose();
+  }
+
+  Future<void> _loadHistory({bool showLoadingIndicator = false}) async {
+    if (showLoadingIndicator && mounted) {
+      setState(() {
+        _loading = true;
+      });
+    }
     final res = await ApiService.fetchHistory(limit: 50);
     if (!mounted) return;
-    setState(() {
-      _loading = false;
-      if (res['success'] == true) {
-        _items = (res['data']['scans'] as List?) ?? [];
-      }
-    });
+    if (res['success'] == true) {
+      final data = res['data'] as Map<String, dynamic>? ?? {};
+      final scans = data['scans'];
+      setState(() {
+        _items = scans is List ? scans : [];
+        _loading = false;
+      });
+    } else {
+      debugPrint('History load failed: ${res['error']}');
+      setState(() {
+        _loading = false;
+      });
+    }
   }
 
   @override
@@ -72,33 +124,49 @@ class _HistoryPageState extends State<HistoryPage> {
         color: AppColors.headerGrey,
         child: _loading
             ? const Center(child: CircularProgressIndicator())
-            : (_items.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: const [
-                        Text(
-                          "You don't have any history",
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.primaryBrown,
-                          ),
-                        ),
-                        SizedBox(height: AppConstants.smallSpacing),
-                        Text(
-                          "Once you scan a coffee bean, results will show up here.",
-                          style: TextStyle(fontSize: 12, color: AppColors.textGrey),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.separated(
-                    padding: const EdgeInsets.all(AppConstants.defaultPadding),
-                    itemBuilder: (_, index) => _historyTile(_items[index]),
-                    separatorBuilder: (_, __) => const SizedBox(height: AppConstants.smallSpacing),
-                    itemCount: _items.length,
-                  )),
+            : RefreshIndicator(
+                onRefresh: () => _loadHistory(showLoadingIndicator: true),
+                child: _items.isEmpty
+                    ? LayoutBuilder(
+                        builder: (context, constraints) {
+                          return ListView(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            padding: const EdgeInsets.symmetric(horizontal: AppConstants.largePadding),
+                            children: [
+                              SizedBox(
+                                height: constraints.maxHeight > 0 ? constraints.maxHeight : 200,
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: const [
+                                    Text(
+                                      "You don't have any history",
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w600,
+                                        color: AppColors.primaryBrown,
+                                      ),
+                                    ),
+                                    SizedBox(height: AppConstants.smallSpacing),
+                                    Text(
+                                      "Once you scan a coffee bean, results will show up here.",
+                                      style: TextStyle(fontSize: 12, color: AppColors.textGrey),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      )
+                    : ListView.separated(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        padding: const EdgeInsets.all(AppConstants.defaultPadding),
+                        itemBuilder: (_, index) => _historyTile(_items[index]),
+                        separatorBuilder: (_, __) => const SizedBox(height: AppConstants.smallSpacing),
+                        itemCount: _items.length,
+                      ),
+              ),
       ),
     );
   }

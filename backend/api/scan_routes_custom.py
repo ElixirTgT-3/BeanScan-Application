@@ -101,10 +101,10 @@ def _fallback_bean_count(defect_detection, health_score):
 router = APIRouter()
 
 # Initialize custom models
-print("🚀 Loading custom deep learning models...")
+print("[INFO] Loading custom deep learning models...")
 models = create_models(device='cpu')  # Use 'cuda' if GPU available
 ensemble = models['ensemble']
-print("✅ Models loaded successfully!")
+print("[OK] Models loaded successfully!")
 
 # Image transformations for the models
 transform = transforms.Compose([
@@ -137,11 +137,11 @@ async def scan_bean_image(
             file_ext = image.filename.lower().split('.')[-1] if '.' in image.filename else ''
             if f'.{file_ext}' in valid_extensions:
                 is_valid_image = True
-                print(f"✅ Valid image by extension: {image.filename}")
+                print(f"[OK] Valid image by extension: {image.filename}")
         
         if not is_valid_image:
-            print(f"❌ Invalid content type: {image.content_type}")
-            print(f"❌ Filename: {image.filename}")
+            print(f"[ERROR] Invalid content type: {image.content_type}")
+            print(f"[ERROR] Filename: {image.filename}")
             raise HTTPException(status_code=400, detail=f"File must be an image. Received content type: {image.content_type}, filename: {image.filename}")
         
         # Read image bytes
@@ -176,12 +176,12 @@ async def scan_bean_image(
             image_tensor = transform(image_pil).unsqueeze(0)  # Add batch dimension
             
             # Run complete analysis using ensemble model
-            print("🔍 Running deep learning analysis...")
+            print("[INFO] Running deep learning analysis...")
             try:
                 analysis_results = ensemble.forward(image_tensor)
-                print("✅ Ensemble analysis completed")
+                print("[OK] Ensemble analysis completed")
             except Exception as e:
-                print(f"❌ Ensemble analysis failed: {e}")
+                print(f"[ERROR] Ensemble analysis failed: {e}")
                 raise e
             
             # Extract results
@@ -189,23 +189,32 @@ async def scan_bean_image(
             defect_detection = analysis_results['defect_detection']
             health_score = analysis_results['health_score']
             
-            print(f"📊 Analysis complete: Bean={bean_classification[0]['class']}, Health={health_score['grade']}")
+            print(f"[STATS] Analysis complete: Bean={bean_classification[0]['class']}, Health={health_score['grade']}")
             
             # Resolve user by device_id when provided (no login flow)
             resolved_user_id = user_id
             try:
                 if device_id and not user_id:
+                    print(f"[DEBUG] Scan request - device_id: {device_id}")
                     # Prefer explicit device_id column if present; fallback to Name
                     user_lookup = None
                     try:
                         user_lookup = supabase.table("User").select("user_id").eq("device_id", device_id).limit(1).execute()
-                    except Exception:
+                        print(f"[DEBUG] User lookup by device_id result: {user_lookup.data}")
+                    except Exception as e:
+                        print(f"[WARNING] Database connection issue during user lookup: {e}")
                         user_lookup = None
                     if not (user_lookup and user_lookup.data):
-                        user_lookup = supabase.table("User").select("user_id").eq("Name", device_id).limit(1).execute()
+                        try:
+                            user_lookup = supabase.table("User").select("user_id").eq("Name", device_id).limit(1).execute()
+                            print(f"[DEBUG] User lookup by Name result: {user_lookup.data}")
+                        except Exception as e:
+                            print(f"[WARNING] Database connection issue during user lookup by name: {e}")
+                            user_lookup = None
 
                     if user_lookup and user_lookup.data:
                         resolved_user_id = user_lookup.data[0]["user_id"]
+                        print(f"[DEBUG] Found existing user_id: {resolved_user_id}")
                     else:
                         # Create a lightweight user row for this device
                         payload = {
@@ -218,26 +227,46 @@ async def scan_bean_image(
                             payload["device_id"] = device_id
                         except Exception:
                             pass
-                        new_user = supabase.table("User").insert(payload).execute()
-                        if new_user.data:
-                            resolved_user_id = new_user.data[0]["user_id"]
+                        print(f"[DEBUG] Creating new user with payload: {payload}")
+                        try:
+                            new_user = supabase.table("User").insert(payload).execute()
+                            print(f"[DEBUG] New user creation result: {new_user.data}")
+                            if new_user.data:
+                                resolved_user_id = new_user.data[0]["user_id"]
+                                print(f"[DEBUG] Created new user_id: {resolved_user_id}")
+                        except Exception as e:
+                            print(f"[WARNING] Database connection issue during user creation: {e}")
+                            # If user creation fails, we'll proceed without user_id
+                            # This allows the scan to complete even if database is down
+                            resolved_user_id = None
             except Exception as _user_err:
+                print(f"[WARNING] Database connection issue during user resolution: {_user_err}")
                 # Proceed without user if mapping fails
                 resolved_user_id = user_id
 
             # Get or create bean type
             bean_type_name = bean_classification[0]['class']
-            bean_type_result = supabase.table(BEAN_TYPE_TABLE).select("bean_type_id").eq("type_name", bean_type_name).execute()
-            
-            if bean_type_result.data:
-                bean_type_id = bean_type_result.data[0]["bean_type_id"]
-            else:
-                # Create new bean type if it doesn't exist
-                new_bean_type = supabase.table(BEAN_TYPE_TABLE).insert({
-                    "type_name": bean_type_name,
-                    "description": f"Auto-detected bean type: {bean_type_name}"
-                }).execute()
-                bean_type_id = new_bean_type.data[0]["bean_type_id"]
+            bean_type_id = None
+            try:
+                bean_type_result = supabase.table(BEAN_TYPE_TABLE).select("bean_type_id").eq("type_name", bean_type_name).execute()
+                
+                if bean_type_result.data:
+                    bean_type_id = bean_type_result.data[0]["bean_type_id"]
+                else:
+                    # Create new bean type if it doesn't exist
+                    try:
+                        new_bean_type = supabase.table(BEAN_TYPE_TABLE).insert({
+                            "type_name": bean_type_name,
+                            "description": f"Auto-detected bean type: {bean_type_name}"
+                        }).execute()
+                        if new_bean_type.data:
+                            bean_type_id = new_bean_type.data[0]["bean_type_id"]
+                    except Exception as e:
+                        print(f"[WARNING] Database connection issue during bean type creation: {e}")
+                        bean_type_id = None
+            except Exception as e:
+                print(f"[WARNING] Database connection issue during bean type lookup: {e}")
+                bean_type_id = None
             
             # Prepare image data
             image_data = {
@@ -251,24 +280,36 @@ async def scan_bean_image(
             }
             
             # Insert image record
-            image_result = supabase.table(BEAN_IMAGE_TABLE).insert(image_data).execute()
-            image_id = image_result.data[0]["image_id"]
+            image_id = None
+            try:
+                image_result = supabase.table(BEAN_IMAGE_TABLE).insert(image_data).execute()
+                if image_result.data:
+                    image_id = image_result.data[0]["image_id"]
+            except Exception as e:
+                print(f"[WARNING] Database connection issue during image insertion: {e}")
+                image_id = None
             
             # Create defect records
             defect_id = None
-            if defect_detection:
-                for defect in defect_detection:
-                    defect_data = {
-                        "image_id": image_id,
-                        "defect_type": defect['defect_type'],
-                        "severity_level": defect['severity_level'] if 'severity_level' in defect else 'medium',
-                        "defect_area": defect['area'],
-                        "defect_percentage": defect['defect_percentage'] if 'defect_percentage' in defect else 0,
-                        "defect_coordinates": defect['coordinates']
-                    }
-                    defect_result = supabase.table(DEFECT_TABLE).insert(defect_data).execute()
-                    if defect_id is None:
-                        defect_id = defect_result.data[0]["defect_id"]
+            if defect_detection and image_id:
+                try:
+                    for defect in defect_detection:
+                        defect_data = {
+                            "image_id": image_id,
+                            "defect_type": defect['defect_type'],
+                            "severity_level": defect['severity_level'] if 'severity_level' in defect else 'medium',
+                            "defect_area": defect['area'],
+                            "defect_percentage": defect['defect_percentage'] if 'defect_percentage' in defect else 0,
+                            "defect_coordinates": defect['coordinates']
+                        }
+                        try:
+                            defect_result = supabase.table(DEFECT_TABLE).insert(defect_data).execute()
+                            if defect_result.data and defect_id is None:
+                                defect_id = defect_result.data[0]["defect_id"]
+                        except Exception as e:
+                            print(f"[WARNING] Database connection issue during defect insertion: {e}")
+                except Exception as e:
+                    print(f"[WARNING] Database connection issue during defect processing: {e}")
             
             # Create shelf life prediction using rule-based model
             shelf_life_model = models['shelf_life_model']
@@ -277,10 +318,11 @@ async def scan_bean_image(
             defect_sequence = []
             if defect_detection:
                 for defect in defect_detection:
+                    defect_type = defect.get('type') or defect.get('defect_type') or 'unknown'
                     defect_sequence.append({
-                        'type': defect.get('type', 'unknown'),
+                        'type': defect_type,
                         'confidence': defect.get('confidence', 0.5),
-                        'count': 1
+                        'count': defect.get('count', 1) if isinstance(defect.get('count'), (int, float)) else 1
                     })
             
             # Get shelf life prediction
@@ -288,6 +330,15 @@ async def scan_bean_image(
                 defect_sequence, 
                 bean_type_name
             )
+            defect_summary = {
+                "total_defects": len(defect_detection),
+                "defect_types": shelf_life_prediction.get('defect_counts', {}),
+                "defect_percentage": shelf_life_prediction.get('defect_percentage', 0.0),
+                "quality_score": health_score.get('percentage', 0.0),
+                "quality_grade": shelf_life_prediction.get('quality_grade', health_score.get('grade', 'Unknown')),
+                "severity": shelf_life_prediction.get('severity'),
+                "average_detection_confidence": shelf_life_prediction.get('average_detection_confidence', 0.0)
+            }
             
             shelf_life_data = {
                 "image_id": image_id,
@@ -298,14 +349,20 @@ async def scan_bean_image(
                 "storage_conditions": {"temperature": "room_temp", "humidity": "low"}
             }
             
-            shelf_life_result = supabase.table(SHELF_LIFE_TABLE).insert(shelf_life_data).execute()
-            shelf_life_id = shelf_life_result.data[0]["shelf_life_id"]
+            shelf_life_id = None
+            try:
+                shelf_life_result = supabase.table(SHELF_LIFE_TABLE).insert(shelf_life_data).execute()
+                if shelf_life_result.data:
+                    shelf_life_id = shelf_life_result.data[0]["shelf_life_id"]
+            except Exception as e:
+                print(f"[WARNING] Database connection issue during shelf life insertion: {e}")
+                shelf_life_id = None
             
             # Bean counting removed from response/data model
             
             # Calculate percentages for history
-            healthy_percent = health_score['percentage']
-            defective_percent = 100 - healthy_percent
+            defective_percent = shelf_life_prediction.get('defect_percentage', max(0.0, 100 - health_score['percentage']))
+            healthy_percent = max(0.0, 100 - defective_percent)
             
             # Create history record
             history_data = {
@@ -320,15 +377,26 @@ async def scan_bean_image(
                 "notes": f"Health Grade: {health_score['grade']}, Defects: {len(defect_detection)}"
             }
             
-            history_result = supabase.table(HISTORY_TABLE).insert(history_data).execute()
-            history_id = history_result.data[0]["history_id"]
+            history_id = None
+            try:
+                history_result = supabase.table(HISTORY_TABLE).insert(history_data).execute()
+                if history_result.data:
+                    history_id = history_result.data[0]["history_id"]
+            except Exception as e:
+                print(f"[WARNING] Database connection issue during history insertion: {e}")
+                history_id = None
             
             # Clean up temp file
             os.remove(temp_path)
             
+            print(f"[DEBUG] Scan response - history_id: {history_id}, image_id: {image_id}, user_id: {resolved_user_id}")
+            
             return JSONResponse(content={
                 "success": True,
                 "history_id": history_id,
+                "image_id": image_id,
+                "image_url": public_image_url,
+                "user_id": resolved_user_id,  # Include user_id in response for debugging
                 "data": {
                     "prediction": {
                         "predicted_class": bean_type_name,
@@ -337,13 +405,7 @@ async def scan_bean_image(
                     },
                     "defect_detection": {
                         "detections": defect_detection,
-                        "summary": {
-                            "total_defects": len(defect_detection),
-                            "defect_types": {},
-                            "defect_percentage": 0.0,
-                            "quality_score": health_score.get('percentage', 0.0),
-                            "quality_grade": health_score.get('grade', 'F')
-                        }
+                        "summary": defect_summary
                     },
                     # bean_count removed
                     "health_score": health_score,
@@ -353,16 +415,23 @@ async def scan_bean_image(
                         "category": shelf_life_prediction['category'],
                         "defect_score": shelf_life_prediction['defect_score'],
                         "defect_counts": shelf_life_prediction['defect_counts'],
+                        "defect_percentage": shelf_life_prediction.get('defect_percentage', 0.0),
+                        "severity": shelf_life_prediction.get('severity'),
+                        "estimated_months": shelf_life_prediction.get('estimated_months'),
+                        "estimated_months_range": shelf_life_prediction.get('estimated_months_range'),
+                        "average_detection_confidence": shelf_life_prediction.get('average_detection_confidence'),
+                        "quality_grade": shelf_life_prediction.get('quality_grade'),
                         "base_shelf_life": shelf_life_prediction['base_shelf_life']
                     }
                 },
-                "message": "Bean analysis completed successfully"
+                "message": "Bean analysis completed successfully",
+                "database_saved": history_id is not None
             })
             
         except Exception as e:
             import traceback
-            print(f"❌ Error in analysis: {e}")
-            print(f"❌ Traceback: {traceback.format_exc()}")
+            print(f"[ERROR] Error in analysis: {e}")
+            print(f"[ERROR] Traceback: {traceback.format_exc()}")
             # Clean up temp file on error
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -371,9 +440,9 @@ async def scan_bean_image(
     except Exception as e:
         import traceback
         error_msg = str(e) if str(e) else "Unknown error"
-        print(f"❌ Error in scan_bean_image: {error_msg}")
-        print(f"❌ Error type: {type(e).__name__}")
-        print(f"❌ Traceback: {traceback.format_exc()}")
+        print(f"[ERROR] Error in scan_bean_image: {error_msg}")
+        print(f"[ERROR] Error type: {type(e).__name__}")
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Scan failed: {error_msg}")
 
 @router.get("/scan/{history_id}")
@@ -471,11 +540,11 @@ async def advanced_bean_analysis(
             file_ext = image.filename.lower().split('.')[-1] if '.' in image.filename else ''
             if f'.{file_ext}' in valid_extensions:
                 is_valid_image = True
-                print(f"✅ Valid image by extension: {image.filename}")
+                print(f"[OK] Valid image by extension: {image.filename}")
         
         if not is_valid_image:
-            print(f"❌ Invalid content type: {image.content_type}")
-            print(f"❌ Filename: {image.filename}")
+            print(f"[ERROR] Invalid content type: {image.content_type}")
+            print(f"[ERROR] Filename: {image.filename}")
             raise HTTPException(status_code=400, detail=f"File must be an image. Received content type: {image.content_type}, filename: {image.filename}")
         
         # Read image bytes

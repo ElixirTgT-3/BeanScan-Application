@@ -5,20 +5,54 @@ import 'pages/settings_page.dart';
 import 'pages/splash_page.dart';
 import 'utils/app_colors.dart';
 import 'utils/app_constants.dart';
+import 'utils/app_settings.dart';
 
-void main() => runApp(const BeanScanApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await AppSettings.instance.load();
+  runApp(const BeanScanApp());
+}
 
 class BeanScanApp extends StatelessWidget {
   const BeanScanApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        scaffoldBackgroundColor: AppColors.lightBeige,
-      ),
-      home: const SplashPage(),
+    return AnimatedBuilder(
+      animation: AppSettings.instance,
+      builder: (context, _) {
+        final settings = AppSettings.instance;
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          themeMode: settings.themeMode,
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: AppColors.primaryBrown,
+              background: AppColors.lightBeige,
+            ),
+            scaffoldBackgroundColor: AppColors.lightBeige,
+            appBarTheme: const AppBarTheme(
+              backgroundColor: AppColors.lightBeige,
+              foregroundColor: AppColors.primaryBrown,
+              elevation: 0,
+            ),
+          ),
+          darkTheme: ThemeData(
+            brightness: Brightness.dark,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: AppColors.primaryBrown,
+              brightness: Brightness.dark,
+            ),
+            scaffoldBackgroundColor: Colors.grey[900],
+            appBarTheme: AppBarTheme(
+              backgroundColor: Colors.grey[900],
+              foregroundColor: Colors.white,
+              elevation: 0,
+            ),
+          ),
+          home: const SplashPage(),
+        );
+      },
     );
   }
 }
@@ -31,14 +65,18 @@ class MainNavigationPage extends StatefulWidget {
 }
 
 class _MainNavigationPageState extends State<MainNavigationPage> {
+  final HistoryPageController _historyController = HistoryPageController();
   int currentPageIndex = 0;
 
   @override
   Widget build(BuildContext context) {
     final pages = [
-      const HistoryPage(),
+      HistoryPage(controller: _historyController),
       ScanPage(
-        onClose: () => setState(() => currentPageIndex = 0),
+        onClose: () {
+          setState(() => currentPageIndex = 0);
+          _historyController.refresh(showLoadingIndicator: true);
+        },
       ),
       const SettingsPage(),
     ];
@@ -70,7 +108,12 @@ class _MainNavigationPageState extends State<MainNavigationPage> {
                   color: AppColors.primaryBrown,
                   size: currentPageIndex == 0 ? 28 : 24,
                 ),
-                onPressed: () => setState(() => currentPageIndex = 0),
+                onPressed: () {
+                  if (currentPageIndex != 0) {
+                    setState(() => currentPageIndex = 0);
+                  }
+                  _historyController.refresh();
+                },
               ),
               SizedBox(width: AppConstants.centerButtonSpace),
               IconButton(
@@ -92,7 +135,12 @@ class _MainNavigationPageState extends State<MainNavigationPage> {
     return FloatingActionButton(
       backgroundColor: AppColors.primaryBrown,
       shape: const CircleBorder(),
-      child: const Icon(Icons.qr_code_scanner, color: Colors.white),
+      child: Image.asset(
+        'assets/images/icons/scan.png',
+        width: 24,
+        height: 24,
+        color: Colors.white,
+      ),
       onPressed: () => setState(() => currentPageIndex = 1),
     );
   }
