@@ -7,6 +7,8 @@ import '../utils/api_service.dart';
 import '../utils/local_history_store.dart';
 import 'results_page.dart';
 
+enum HistoryFilterOption { all, offline, needsAttention }
+
 class HistoryPageController {
   _HistoryPageState? _state;
 
@@ -40,7 +42,9 @@ class HistoryPage extends StatefulWidget {
 
 class _HistoryPageState extends State<HistoryPage> {
   List<dynamic> _items = [];
+  List<dynamic> _filteredItems = [];
   bool _loading = true;
+  HistoryFilterOption _activeFilter = HistoryFilterOption.all;
 
   static const Color _lightBackground = Color(0xFFF0F0F0);
   static const Color _lightCard = Color(0xFFF1E7D2);
@@ -134,6 +138,7 @@ class _HistoryPageState extends State<HistoryPage> {
     setState(() {
       _items = combined;
       _loading = false;
+      _filteredItems = _computeFilteredItems();
     });
   }
 
@@ -194,7 +199,55 @@ class _HistoryPageState extends State<HistoryPage> {
                   ),
                 ),
               ),
-              const SizedBox(width: 36),
+              _buildHeaderAction(isDark),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeaderAction(bool isDark) {
+    final Color chipBackground =
+        (isDark ? _darkIconBackground : _lightIconBackground).withValues(
+          alpha: isDark ? 0.65 : 0.85,
+        );
+    final Color borderColor = isDark
+        ? _darkBorder.withValues(alpha: 0.6)
+        : _lightBorder;
+    final Color textColor = isDark ? Colors.white : _lightHeaderText;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: _openFilterSheet,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: chipBackground,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: borderColor,
+              width: AppConstants.thinBorder,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.filter_list,
+                size: 18,
+                color: textColor.withValues(alpha: 0.85),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                _filterLabel(_activeFilter),
+                style: TextStyle(
+                  color: textColor,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ],
           ),
         ),
@@ -226,7 +279,7 @@ class _HistoryPageState extends State<HistoryPage> {
               )
             : RefreshIndicator(
                 onRefresh: () => _loadHistory(showLoadingIndicator: true),
-                child: _items.isEmpty
+                child: _filteredItems.isEmpty
                     ? LayoutBuilder(
                         builder: (context, constraints) {
                           return ListView(
@@ -279,7 +332,7 @@ class _HistoryPageState extends State<HistoryPage> {
                         itemBuilder: (_, index) => _historyTile(
                           context,
                           colorScheme,
-                          _items[index],
+                          _filteredItems[index],
                           cardBackground,
                           borderColor,
                           headerTextColor,
@@ -288,7 +341,7 @@ class _HistoryPageState extends State<HistoryPage> {
                         ),
                         separatorBuilder: (_, __) =>
                             const SizedBox(height: AppConstants.mediumSpacing),
-                        itemCount: _items.length,
+                        itemCount: _filteredItems.length,
                       ),
               ),
       ),
@@ -305,20 +358,16 @@ class _HistoryPageState extends State<HistoryPage> {
     Color bodyTextColor,
     bool isDark,
   ) {
-    final String beanType =
-        (item['bean_type_name'] ?? item['bean_type'] ?? 'Unknown').toString();
+    final String beanType = (item['bean_type_name'] ?? item['bean_type'] ?? 'Unknown').toString();
     final double defectivePct = _deriveDefectPercentage(item);
     final double healthyPct = _deriveHealthyPercentage(item, defectivePct);
-    final Color effectiveBorder = isDark
-        ? borderColor.withValues(alpha: 0.55)
-        : borderColor;
-    final Color effectiveCardColor = cardBackground.withValues(
-      alpha: isDark ? 0.75 : 0.85,
-    );
+    final Color effectiveBorder =
+        isDark ? borderColor.withValues(alpha: 0.55) : borderColor;
+    final Color effectiveCardColor =
+        cardBackground.withValues(alpha: isDark ? 0.75 : 0.85);
     final Color iconBackground =
-        (isDark ? _darkIconBackground : _lightIconBackground).withValues(
-          alpha: isDark ? 0.75 : 0.9,
-        );
+        (isDark ? _darkIconBackground : _lightIconBackground)
+            .withValues(alpha: isDark ? 0.75 : 0.9);
     final String dateLabel = _formatHistoryTimestamp(item['created_at']);
     final String shelfLifeLabel = _formatShelfLifeLabel(item);
 
@@ -350,12 +399,16 @@ class _HistoryPageState extends State<HistoryPage> {
           );
 
           final fallbackDefectivePct = _asDouble(item['defective_percent']);
-          final localShelfLife =
-              _cloneMap(localData['shelf_life']) ??
-              _cloneMap(localData['shelf_life_prediction']);
+          final localShelfLife = _cloneMap(localData['shelf_life']);
           if (fallbackDefectivePct != null && localShelfLife != null) {
-            localShelfLife['defect_percentage'] = fallbackDefectivePct;
-            localShelfLife['defective_percent'] = fallbackDefectivePct;
+            localShelfLife.putIfAbsent(
+              'defect_percentage',
+              () => fallbackDefectivePct,
+            );
+            localShelfLife.putIfAbsent(
+              'defective_percent',
+              () => fallbackDefectivePct,
+            );
           }
           Map<String, dynamic>? localDefectDetection = _cloneMap(
             localData['defect_detection'],
@@ -365,7 +418,10 @@ class _HistoryPageState extends State<HistoryPage> {
                 _cloneMap(localDefectDetection['summary']) ??
                 <String, dynamic>{};
             if (fallbackDefectivePct != null) {
-              summary['defect_percentage'] = fallbackDefectivePct;
+              summary.putIfAbsent(
+                'defect_percentage',
+                () => fallbackDefectivePct,
+              );
             }
             _ensureSeverityConsistency(
               summary: summary,
@@ -396,7 +452,6 @@ class _HistoryPageState extends State<HistoryPage> {
                 defectDetection: localDefectDetection,
                 shelfLife: localShelfLife,
                 shouldAutoSave: false,
-                fromHistory: true,
               ),
             ),
           );
@@ -427,31 +482,40 @@ class _HistoryPageState extends State<HistoryPage> {
         Map<String, dynamic>? shelfLifeData =
             _cloneMap(data['shelf_life']) ??
             _cloneMap(data['shelf_life_prediction']);
-        Map<String, dynamic>? defectDetection = _cloneMap(
-          data['defect_detection'],
-        );
+        Map<String, dynamic>? defectDetection =
+            _cloneMap(data['defect_detection']);
 
-        final double? historyDefectivePct = _asDouble(
-          historyData?['defective_percent'],
-        );
-        final double listDefectivePct = _deriveDefectPercentage(item);
-        final double effectiveDefectivePct =
+        final double? historyDefectivePct =
+            _asDouble(historyData?['defective_percent']);
+        final double? listDefectivePct = _deriveDefectPercentage(item);
+        final double? effectiveDefectivePct =
             historyDefectivePct ?? listDefectivePct;
-        final Map<String, dynamic> effectiveShelfLife =
-            shelfLifeData ??= <String, dynamic>{};
-        effectiveShelfLife['defect_percentage'] = effectiveDefectivePct;
-        effectiveShelfLife['defective_percent'] = effectiveDefectivePct;
+        if (effectiveDefectivePct != null) {
+          shelfLifeData ??= <String, dynamic>{};
+          shelfLifeData.putIfAbsent(
+            'defect_percentage',
+            () => effectiveDefectivePct,
+          );
+          shelfLifeData.putIfAbsent(
+            'defective_percent',
+            () => effectiveDefectivePct,
+          );
+        }
 
         if (defectDetection != null) {
           final summary =
               _cloneMap(defectDetection['summary']) ?? <String, dynamic>{};
-          double summaryPct =
-              _asDouble(summary['defect_percentage']) ?? effectiveDefectivePct;
-          summary['defect_percentage'] = summaryPct;
+          double? summaryPct = _asDouble(summary['defect_percentage']);
+          if (effectiveDefectivePct != null &&
+              (summaryPct == null ||
+                  (summaryPct == 0 && effectiveDefectivePct > 0))) {
+            summary['defect_percentage'] = effectiveDefectivePct;
+            summaryPct = effectiveDefectivePct;
+          }
 
           final dynamic severitySource =
-              effectiveShelfLife['severity'] ??
-              effectiveShelfLife['category'] ??
+              shelfLifeData?['severity'] ??
+              shelfLifeData?['category'] ??
               historyData?['severity'];
           if ((summary['severity'] == null ||
                   (summary['severity'] as String?)?.isEmpty == true) &&
@@ -462,14 +526,14 @@ class _HistoryPageState extends State<HistoryPage> {
 
           _ensureSeverityConsistency(
             summary: summary,
-            shelfLifeData: effectiveShelfLife,
-            fallbackPercentage: summaryPct,
+            shelfLifeData: shelfLifeData,
+            fallbackPercentage: summaryPct ?? effectiveDefectivePct,
           );
           defectDetection['summary'] = summary;
         } else {
           _ensureSeverityConsistency(
             summary: null,
-            shelfLifeData: effectiveShelfLife,
+            shelfLifeData: shelfLifeData,
             fallbackPercentage: effectiveDefectivePct,
           );
         }
@@ -491,7 +555,6 @@ class _HistoryPageState extends State<HistoryPage> {
               defectDetection: defectDetection,
               shelfLife: shelfLifeData,
               shouldAutoSave: false,
-              fromHistory: true,
             ),
           ),
         );
@@ -567,6 +630,104 @@ class _HistoryPageState extends State<HistoryPage> {
     );
   }
 
+  Future<void> _openFilterSheet() async {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final selected = await showModalBottomSheet<HistoryFilterOption>(
+      context: context,
+      backgroundColor: colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 16),
+            Text(
+              'Filter History',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: colorScheme.primary,
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.list_alt),
+              title: const Text('All Scans'),
+              trailing: _activeFilter == HistoryFilterOption.all
+                  ? Icon(Icons.check, color: colorScheme.primary)
+                  : null,
+              onTap: () => Navigator.of(context).pop(HistoryFilterOption.all),
+            ),
+            ListTile(
+              leading: const Icon(Icons.offline_pin),
+              title: const Text('Saved Offline'),
+              trailing: _activeFilter == HistoryFilterOption.offline
+                  ? Icon(Icons.check, color: colorScheme.primary)
+                  : null,
+              onTap: () =>
+                  Navigator.of(context).pop(HistoryFilterOption.offline),
+            ),
+            ListTile(
+              leading: const Icon(Icons.error_outline),
+              title: const Text('Needs Attention'),
+              subtitle: const Text('Defects above 35%'),
+              trailing: _activeFilter == HistoryFilterOption.needsAttention
+                  ? Icon(Icons.check, color: colorScheme.primary)
+                  : null,
+              onTap: () =>
+                  Navigator.of(context).pop(HistoryFilterOption.needsAttention),
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+      ),
+    );
+
+    if (selected != null && selected != _activeFilter) {
+      setState(() {
+        _activeFilter = selected;
+        _applyFilter();
+      });
+    }
+  }
+
+  String _filterLabel(HistoryFilterOption option) {
+    switch (option) {
+      case HistoryFilterOption.offline:
+        return 'Offline';
+      case HistoryFilterOption.needsAttention:
+        return 'Attention';
+      default:
+        return 'All';
+    }
+  }
+
+  void _applyFilter() {
+    setState(() {
+      _filteredItems = _computeFilteredItems();
+    });
+  }
+
+  List<dynamic> _computeFilteredItems() {
+    List<dynamic> base = List<dynamic>.from(_items);
+    switch (_activeFilter) {
+      case HistoryFilterOption.offline:
+        base = base.where((item) => item['history_id'] == null).toList();
+        break;
+      case HistoryFilterOption.needsAttention:
+        base = base.where((item) {
+          final double? defective = _asDouble(item['defective_percent']);
+          return defective != null && defective >= 35.0;
+        }).toList();
+        break;
+      case HistoryFilterOption.all:
+        break;
+    }
+    return base;
+  }
+
   Map<String, dynamic>? _cloneMap(dynamic value) {
     if (value is Map) {
       return Map<String, dynamic>.from(value);
@@ -628,7 +789,6 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   String? _normalizeSeverity(String? severity, {double? fallbackPercentage}) {
-    String? normalized;
     final trimmed = severity?.trim();
     if (trimmed != null && trimmed.isNotEmpty) {
       final lower = trimmed.toLowerCase();
@@ -636,46 +796,31 @@ class _HistoryPageState extends State<HistoryPage> {
         case 'mild':
         case 'moderate':
         case 'severe':
-          normalized = lower;
-          break;
+          return lower;
         case 'excellent':
         case 'good':
         case 'optimal':
         case 'great':
         case 'low':
-          normalized = 'mild';
-          break;
+          return 'mild';
         case 'warning':
         case 'fair':
         case 'medium':
-          normalized = 'moderate';
-          break;
+          return 'moderate';
         case 'critical':
         case 'expired':
         case 'poor':
         case 'high':
-          normalized = 'severe';
-          break;
+          return 'severe';
         default:
-          normalized = lower;
-          break;
+          return lower;
       }
     }
 
-    final String? fallbackSeverity =
-        fallbackPercentage != null ? _severityFromPercentage(fallbackPercentage) : null;
-
-    if (normalized == null || normalized.isEmpty) {
-      return fallbackSeverity;
+    if (fallbackPercentage != null) {
+      return _severityFromPercentage(fallbackPercentage);
     }
-
-    if (fallbackSeverity == null || fallbackSeverity.isEmpty) {
-      return normalized;
-    }
-
-    return _severityRank(normalized) >= _severityRank(fallbackSeverity)
-        ? normalized
-        : fallbackSeverity;
+    return null;
   }
 
   String _formatHistoryTimestamp(dynamic value) {
@@ -696,9 +841,8 @@ class _HistoryPageState extends State<HistoryPage> {
   String _formatShelfLifeLabel(dynamic item) {
     final double? months = _extractShelfLifeMonths(item);
     if (months != null && months > 0) {
-      final double rounded = months >= 9 ? months.roundToDouble() : months;
       final String display = months >= 9
-          ? rounded.toStringAsFixed(0)
+          ? months.toStringAsFixed(0)
           : months.toStringAsFixed(1);
       return 'Estimated shelf life: $display months';
     }
@@ -712,18 +856,17 @@ class _HistoryPageState extends State<HistoryPage> {
         _asDouble(item['predicted_months']) ??
         _asDouble(item['estimated_months']);
 
-    final Map<String, dynamic>? shelfLifeMap = _deriveShelfLifeMap(item);
+    final Map<String, dynamic>? shelfLifeMap = _cloneMap(item['shelf_life']);
     months ??=
         _asDouble(shelfLifeMap?['predicted_months']) ??
         _asDouble(shelfLifeMap?['estimated_months']);
 
-    if (months != null && !months.isNaN && months > 0) {
-      return months;
+    if (months != null) {
+      return months.isNaN ? null : months;
     }
 
     final double? days =
         _asDouble(shelfLifeMap?['predicted_days']) ??
-        _asDouble(shelfLifeMap?['raw_prediction']) ??
         _asDouble(item['predicted_days']);
     if (days != null && !days.isNaN && days > 0) {
       return days / 30.0;
@@ -796,6 +939,41 @@ class _HistoryPageState extends State<HistoryPage> {
     }
 
     return resolvedPctValue.clamp(0.0, 100.0);
+  }
+
+  double _deriveHealthyPercentage(dynamic raw, double fallbackDefective) {
+    if (raw is! Map<String, dynamic>) {
+      final num clamped = (100.0 - fallbackDefective).clamp(0.0, 100.0);
+      return clamped.toDouble();
+    }
+    final Map<String, dynamic> map = raw;
+    double? value = _asDouble(map['healthy_percent']);
+    value ??= _asDouble(_cloneMap(map['history'])?['healthy_percent']);
+    value ??= _asDouble(_cloneMap(map['health_score'])?['percentage']);
+    if (value == null || value.isNaN) {
+      final num clamped = (100.0 - fallbackDefective).clamp(0.0, 100.0);
+      return clamped.toDouble();
+    }
+    final num clampedValue = value.clamp(0.0, 100.0);
+    return clampedValue.toDouble();
+  }
+
+  Map<String, dynamic>? _deriveShelfLifeMap(Map<String, dynamic> map) {
+    Map<String, dynamic>? resolveShelfLife(Map<String, dynamic>? source) {
+      if (source == null) return null;
+      return _cloneMap(source['shelf_life']) ??
+          _cloneMap(source['shelf_life_prediction']) ??
+          _cloneMap(source['shelfLife']) ??
+          _cloneMap(source['shelfLifePrediction']) ??
+          _cloneMap(source['shelfLifeData']);
+    }
+
+    return resolveShelfLife(map) ??
+        resolveShelfLife(_cloneMap(map['history'])) ??
+        resolveShelfLife(_cloneMap(map['local_data'])) ??
+        resolveShelfLife(_cloneMap(map['localData'])) ??
+        resolveShelfLife(_cloneMap(map['payload'])) ??
+        resolveShelfLife(_cloneMap(map['data']));
   }
 
   Map<String, dynamic>? _resolveDefectDetection(Map<String, dynamic> map) {
@@ -924,59 +1102,10 @@ class _HistoryPageState extends State<HistoryPage> {
     return estimated.clamp(24.0, 95.0);
   }
 
-  double _deriveHealthyPercentage(dynamic raw, double fallbackDefective) {
-    if (raw is! Map<String, dynamic>) {
-      final num clamped = (100.0 - fallbackDefective).clamp(0.0, 100.0);
-      return clamped.toDouble();
-    }
-    final Map<String, dynamic> map = raw;
-    double? value = _asDouble(map['healthy_percent']);
-    value ??= _asDouble(_cloneMap(map['history'])?['healthy_percent']);
-    value ??= _asDouble(_cloneMap(map['health_score'])?['percentage']);
-    if (value == null || value.isNaN) {
-      final num clamped = (100.0 - fallbackDefective).clamp(0.0, 100.0);
-      return clamped.toDouble();
-    }
-    final num clampedValue = value.clamp(0.0, 100.0);
-    return clampedValue.toDouble();
-  }
-
-  Map<String, dynamic>? _deriveShelfLifeMap(Map<String, dynamic> map) {
-    Map<String, dynamic>? resolveShelfLife(Map<String, dynamic>? source) {
-      if (source == null) return null;
-      return _cloneMap(source['shelf_life']) ??
-          _cloneMap(source['shelf_life_prediction']) ??
-          _cloneMap(source['shelfLife']) ??
-          _cloneMap(source['shelfLifePrediction']) ??
-          _cloneMap(source['shelfLifeData']);
-    }
-
-    return resolveShelfLife(map) ??
-        resolveShelfLife(_cloneMap(map['history'])) ??
-        // Local cached entries store the shelf-life payload under local_data
-        resolveShelfLife(_cloneMap(map['local_data'])) ??
-        resolveShelfLife(_cloneMap(map['localData'])) ??
-        resolveShelfLife(_cloneMap(map['payload'])) ??
-        resolveShelfLife(_cloneMap(map['data']));
-  }
-
   String _severityFromPercentage(double percentage) {
-    if (percentage < 22) return 'mild';
+    if (percentage < 32) return 'mild';
     if (percentage < 78) return 'moderate';
     return 'severe';
-  }
-
-  int _severityRank(String? value) {
-    switch (value) {
-      case 'mild':
-        return 1;
-      case 'moderate':
-        return 2;
-      case 'severe':
-        return 3;
-      default:
-        return 0;
-    }
   }
 }
 

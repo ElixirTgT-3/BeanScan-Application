@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_file_dialog/flutter_file_dialog.dart';
@@ -33,6 +35,7 @@ void _logResultsPage(
 
 class ResultsPage extends StatelessWidget {
   static final Expando<bool> _autoSaveGuard = Expando<bool>();
+  static final Map<String, Future<Size?>> _imageSizeCache = <String, Future<Size?>>{};
   final BeanPrediction prediction;
   final String imagePath;
   final Map<String, dynamic>? defectDetection;
@@ -784,70 +787,81 @@ class ResultsPage extends StatelessWidget {
       );
     }
 
-    final detections = _getDetections();
-    final Size? originalSize = _resolveOriginalDetectionSize(detections);
+    final List<dynamic> detections = _getDetections();
+    final Size? detectionSize = _resolveOriginalDetectionSize(detections);
 
-    Widget imageStack = Stack(
-      fit: StackFit.expand,
-      children: [
-        Positioned.fill(child: _buildImageWidget(context, colorScheme, fit: BoxFit.fill)),
-        if (defectDetection != null && defectDetection!['detections'] != null)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: _buildDefectAnnotations(originalSize),
+    return FutureBuilder<Size?>(
+      future: _resolveImageDisplaySize(detectionSize),
+      builder: (context, snapshot) {
+        final Size? resolvedSize = snapshot.data ?? detectionSize;
+        final bool hasDetections = detections.isNotEmpty;
+
+        Widget imageStack = Stack(
+          fit: StackFit.expand,
+          children: [
+            Positioned.fill(child: _buildImageWidget(context, colorScheme, fit: BoxFit.fill)),
+            if (hasDetections)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: _buildDefectAnnotations(resolvedSize),
+                ),
+              ),
+            if (defectDetection != null && defectDetection!['summary'] != null)
+              _buildDefectCountOverlay(colorScheme),
+          ],
+        );
+
+        if (resolvedSize != null && resolvedSize.width > 0 && resolvedSize.height > 0) {
+          imageStack = FittedBox(
+            fit: BoxFit.contain,
+            alignment: Alignment.center,
+            child: SizedBox(
+              width: resolvedSize.width,
+              height: resolvedSize.height,
+              child: imageStack,
+            ),
+          );
+        }
+
+        return Container(
+          height: 220,
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+            border: Border.all(
+              color: colorScheme.outline.withValues(alpha: 0.3),
+              width: AppConstants.thinBorder,
             ),
           ),
-        if (defectDetection != null && defectDetection!['summary'] != null)
-          _buildDefectCountOverlay(colorScheme),
-      ],
-    );
-
-    if (originalSize != null && originalSize.width > 0 && originalSize.height > 0) {
-      imageStack = FittedBox(
-        fit: BoxFit.contain,
-        alignment: Alignment.center,
-        child: SizedBox(
-          width: originalSize.width,
-          height: originalSize.height,
-          child: imageStack,
-        ),
-      );
-    }
-
-    return Container(
-      height: 220,
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(AppConstants.largeRadius),
-        border: Border.all(
-          color: colorScheme.outline.withValues(alpha: 0.3),
-          width: AppConstants.thinBorder,
-        ),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(AppConstants.largeRadius),
-        child: imageStack,
-      ),
+          clipBehavior: Clip.antiAlias,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(AppConstants.largeRadius),
+            child: imageStack,
+          ),
+        );
+      },
     );
   }
 
   Widget _buildImageWidget(BuildContext context, ColorScheme colorScheme, {BoxFit fit = BoxFit.cover}) {
-    _logResultsPage('🔍 _buildImageWidget - imagePath: $imagePath');
-    final isHttp = imagePath.startsWith('http');
-    final isAbsolutePath = imagePath.startsWith('/') || imagePath.startsWith('http');
-    final String url = imagePath.startsWith('/') ? (ApiService.apiUrl + imagePath) : imagePath;
-    _logResultsPage('🔍 _buildImageWidget - isHttp: $isHttp, isAbsolutePath: $isAbsolutePath, url: $url');
-    
-    if (isHttp || imagePath.startsWith('/')) {
+    _logResultsPage('_buildImageWidget - imagePath: $imagePath');
+    final File potentialFile = File(imagePath);
+    final bool fileExists = potentialFile.existsSync();
+    final bool isHttp = imagePath.startsWith('http');
+    final bool isServerRelative = imagePath.startsWith('/') && !fileExists;
+    final bool useNetwork = isHttp || isServerRelative;
+    final String url = isServerRelative ? (ApiService.apiUrl + imagePath) : imagePath;
+    _logResultsPage('_buildImageWidget - useNetwork: $useNetwork, fileExists: $fileExists, url: $url');
+
+    if (useNetwork) {
       return Image.network(
         url,
         fit: fit,
         width: double.infinity,
         height: double.infinity,
         errorBuilder: (c, e, s) {
-          _logResultsPage('🔍 Image.network error: $e');
+          _logResultsPage('_buildImageWidget Image.network error: $e');
           return Center(
             child: Icon(
               Icons.broken_image,
@@ -864,13 +878,25 @@ class ResultsPage extends StatelessWidget {
         },
       );
     }
+
+    if (!fileExists) {
+      _logResultsPage('_buildImageWidget - local file not found: $imagePath');
+      return Center(
+        child: Icon(
+          Icons.broken_image,
+          color: colorScheme.onSurface.withValues(alpha: 0.54),
+          size: 48,
+        ),
+      );
+    }
+
     return Image.file(
-      File(imagePath),
+      potentialFile,
       fit: fit,
       width: double.infinity,
       height: double.infinity,
       errorBuilder: (c, e, s) {
-        _logResultsPage('🔍 Image.file error: $e');
+        _logResultsPage('_buildImageWidget Image.file error: $e');
         return Center(
           child: Icon(
             Icons.broken_image,
@@ -880,6 +906,76 @@ class ResultsPage extends StatelessWidget {
         );
       },
     );
+  }
+
+  Future<Size?> _resolveImageDisplaySize(Size? detectionSize) {
+    if (detectionSize != null && detectionSize.width > 0 && detectionSize.height > 0) {
+      return Future.value(detectionSize);
+    }
+    if (imagePath.isEmpty) {
+      return Future.value(null);
+    }
+
+    final File potentialFile = File(imagePath);
+    final bool fileExists = potentialFile.existsSync();
+    final bool isHttp = imagePath.startsWith('http');
+    final bool isServerRelative = imagePath.startsWith('/') && !fileExists;
+    final bool useNetwork = isHttp || isServerRelative;
+    final String resolvedSource = isServerRelative ? (ApiService.apiUrl + imagePath) : imagePath;
+    final String cacheKey = useNetwork ? resolvedSource : potentialFile.path;
+
+    final Future<Size?>? cached = _imageSizeCache[cacheKey];
+    if (cached != null) {
+      return cached;
+    }
+
+    final Future<Size?> loader = () async {
+      try {
+        final ImageProvider provider = useNetwork
+            ? NetworkImage(resolvedSource)
+            : FileImage(potentialFile);
+        final Size size = await _decodeImageSize(provider);
+        return size;
+      } catch (error, stackTrace) {
+        _logResultsPage(
+          'Failed to resolve image size for $imagePath',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        return null;
+      }
+    }();
+
+    final Future<Size?> tracked = loader.then((Size? value) {
+      if (value == null) {
+        _imageSizeCache.remove(cacheKey);
+      }
+      return value;
+    });
+    _imageSizeCache[cacheKey] = tracked;
+    return tracked;
+  }
+
+  static Future<Size> _decodeImageSize(ImageProvider provider) {
+    final Completer<Size> completer = Completer<Size>();
+    final ImageStream stream = provider.resolve(const ImageConfiguration());
+    late final ImageStreamListener listener;
+    listener = ImageStreamListener(
+      (ImageInfo info, bool _) {
+        stream.removeListener(listener);
+        final ui.Image image = info.image;
+        completer.complete(Size(
+          image.width.toDouble(),
+          image.height.toDouble(),
+        ));
+      },
+      onError: (Object error, StackTrace? stackTrace) {
+        stream.removeListener(listener);
+        completer.completeError(error, stackTrace ?? StackTrace.current);
+      },
+    );
+    stream.addListener(listener);
+    return completer.future;
   }
 
   Widget _buildDefectAnnotations(Size? originalSize) {
@@ -904,22 +1000,21 @@ class ResultsPage extends StatelessWidget {
 
   Size? _resolveOriginalDetectionSize(List<dynamic> detections) {
     for (final detection in detections) {
-      if (detection is Map<String, dynamic>) {
-        if (detection['image_width'] != null && detection['image_height'] != null) {
-          final width = (detection['image_width'] as num).toDouble();
-          final height = (detection['image_height'] as num).toDouble();
-          if (width > 0 && height > 0) {
-            return Size(width, height);
-          }
-        }
-        if (detection['image_size'] is Map) {
-          final dims = Map<String, dynamic>.from(detection['image_size'] as Map);
-          final width = (dims['width'] as num?)?.toDouble();
-          final height = (dims['height'] as num?)?.toDouble();
-          if (width != null && height != null && width > 0 && height > 0) {
-            return Size(width, height);
-          }
-        }
+      if (detection is! Map) continue;
+      final map = Map<String, dynamic>.from(detection);
+
+      double? width = _asDouble(map['image_width']) ?? _asDouble(map['imageWidth']);
+      double? height = _asDouble(map['image_height']) ?? _asDouble(map['imageHeight']);
+
+      final dynamic imageSizeRaw = map['image_size'] ?? map['imageSize'] ?? map['image_dimensions'];
+      if (imageSizeRaw is Map) {
+        final dims = Map<String, dynamic>.from(imageSizeRaw);
+        width ??= _asDouble(dims['width']);
+        height ??= _asDouble(dims['height']);
+      }
+
+      if (width != null && height != null && width > 0 && height > 0) {
+        return Size(width, height);
       }
     }
     return null;
@@ -1639,25 +1734,147 @@ class ResultsPage extends StatelessWidget {
 
   List<dynamic> _getDetections() {
     if (defectDetection == null) return const [];
-    if (defectDetection!['detections'] is List) {
-      return List<dynamic>.from(defectDetection!['detections'] as List);
-    }
-    final dd = Map<String, dynamic>.from(defectDetection!);
-    final coords = Map<String, dynamic>.from(
-      (dd['defect_coordinates'] as Map?) ?? <String, dynamic>{}
-    );
-    return [
-      {
-        'defect_type': dd['defect_type'] ?? 'unknown',
-        'confidence': (dd['confidence'] as num?)?.toDouble() ?? 0.0,
-        'coordinates': {
-          'x1': (coords['x1'] as num?)?.toDouble() ?? 0.0,
-          'y1': (coords['y1'] as num?)?.toDouble() ?? 0.0,
-          'x2': (coords['x2'] as num?)?.toDouble() ?? 0.0,
-          'y2': (coords['y2'] as num?)?.toDouble() ?? 0.0,
-        },
+
+    Map<String, dynamic>? normalize(dynamic raw) {
+      if (raw is! Map) return null;
+      final source = Map<String, dynamic>.from(raw);
+
+      final coords = _extractCoordinateMap(source);
+      if (coords == null) {
+        _logResultsPage('Detection entry missing coordinate information: $source');
+        return null;
       }
-    ];
+
+      final double x1 = _parseCoordinate(coords['x1'] ?? coords['left'] ?? coords['xmin'] ?? coords['x']);
+      final double y1 = _parseCoordinate(coords['y1'] ?? coords['top'] ?? coords['ymin'] ?? coords['y']);
+      double x2 = _parseCoordinate(coords['x2'] ?? coords['right'] ?? coords['xmax']);
+      double y2 = _parseCoordinate(coords['y2'] ?? coords['bottom'] ?? coords['ymax']);
+      final double width = _parseCoordinate(coords['width'] ?? coords['w']);
+      final double height = _parseCoordinate(coords['height'] ?? coords['h']);
+
+      if ((x2 <= x1 || !x2.isFinite) && width > 0) {
+        x2 = x1 + width;
+      }
+      if ((y2 <= y1 || !y2.isFinite) && height > 0) {
+        y2 = y1 + height;
+      }
+
+      final double normalizedConfidence = _normalizeConfidenceValue(
+        source['confidence'] ?? source['score'] ?? source['probability'],
+      );
+
+      final String defectType = (source['defect_type'] ??
+              source['label'] ??
+              source['class'] ??
+              source['type'] ??
+              'unknown')
+          .toString();
+
+      final Map<String, dynamic> normalized = {
+        ...source,
+        'defect_type': defectType,
+        'confidence': normalizedConfidence,
+        'coordinates': {
+          'x1': x1,
+          'y1': y1,
+          'x2': x2,
+          'y2': y2,
+        },
+      };
+
+      final double? imageWidth = _asDouble(source['image_width']) ??
+          _asDouble(source['imageWidth']) ??
+          _asDouble((source['image_size'] as Map?)?['width']) ??
+          _asDouble((source['imageSize'] as Map?)?['width']);
+      final double? imageHeight = _asDouble(source['image_height']) ??
+          _asDouble(source['imageHeight']) ??
+          _asDouble((source['image_size'] as Map?)?['height']) ??
+          _asDouble((source['imageSize'] as Map?)?['height']);
+
+      if (imageWidth != null) {
+        normalized['image_width'] = imageWidth;
+      }
+      if (imageHeight != null) {
+        normalized['image_height'] = imageHeight;
+      }
+      if (imageWidth != null || imageHeight != null) {
+        normalized['image_size'] = {
+          'width': imageWidth,
+          'height': imageHeight,
+        };
+      }
+
+      return normalized;
+    }
+
+    if (defectDetection!['detections'] is List) {
+      final rawList = defectDetection!['detections'] as List;
+      return rawList.map<Map<String, dynamic>?>(normalize).whereType<Map<String, dynamic>>().toList();
+    }
+
+    final Map<String, dynamic>? single = normalize(defectDetection!);
+    return single == null ? const [] : [single];
+  }
+
+  Map<String, dynamic>? _extractCoordinateMap(Map<String, dynamic> source) {
+    final dynamic direct = source['coordinates'] ?? source['defect_coordinates'];
+    if (direct is Map) {
+      return Map<String, dynamic>.from(direct);
+    }
+
+    final dynamic bbox = source['bbox'] ?? source['box'];
+    if (bbox is List && bbox.length >= 4) {
+      return {
+        'x1': bbox[0],
+        'y1': bbox[1],
+        'x2': bbox[2],
+        'y2': bbox[3],
+      };
+    }
+    if (bbox is Map) {
+      return Map<String, dynamic>.from(bbox);
+    }
+
+    if (source.containsKey('x') && source.containsKey('y')) {
+      return {
+        'x1': source['x'],
+        'y1': source['y'],
+        'width': source['width'] ?? source['w'],
+        'height': source['height'] ?? source['h'],
+      };
+    }
+
+    if (source.containsKey('left') && source.containsKey('top')) {
+      return {
+        'x1': source['left'],
+        'y1': source['top'],
+        'x2': source['right'],
+        'y2': source['bottom'],
+        'width': source['width'] ?? source['w'],
+        'height': source['height'] ?? source['h'],
+      };
+    }
+
+    return null;
+  }
+
+  double _parseCoordinate(dynamic value) {
+    final parsed = _asDouble(value);
+    if (parsed == null || parsed.isNaN || !parsed.isFinite) {
+      return 0.0;
+    }
+    return parsed;
+  }
+
+  double _normalizeConfidenceValue(dynamic value) {
+    final double raw = _asDouble(value) ?? 0.0;
+    if (raw > 1.0) {
+      return (raw / 100.0).clamp(0.0, 1.0);
+    }
+    if (raw < 0.0) {
+      return 0.0;
+    }
+    return raw;
   }
 
   double? _estimateDefectPercentageFromDetections(List<dynamic> detections) {
@@ -1882,14 +2099,10 @@ class DefectAnnotationPainter extends CustomPainter {
     double minX = double.infinity;
     double minY = double.infinity;
     for (final detection in detections) {
-      final coords = detection['coordinates'] as Map<String, dynamic>?;
+      final coords = _resolveCoordinates(detection);
       if (coords == null) continue;
-      final x1 = (coords['x1'] as num?)?.toDouble() ?? 0.0;
-      final y1 = (coords['y1'] as num?)?.toDouble() ?? 0.0;
-      final x2 = (coords['x2'] as num?)?.toDouble() ?? 0.0;
-      final y2 = (coords['y2'] as num?)?.toDouble() ?? 0.0;
-      minX = math.min(minX, math.min(x1, x2));
-      minY = math.min(minY, math.min(y1, y2));
+      minX = math.min(minX, math.min(coords['x1']!, coords['x2']!));
+      minY = math.min(minY, math.min(coords['y1']!, coords['y2']!));
     }
     if (!minX.isFinite) minX = 0;
     if (!minY.isFinite) minY = 0;
@@ -1910,18 +2123,21 @@ class DefectAnnotationPainter extends CustomPainter {
 
     for (int i = 0; i < detections.length; i++) {
       final detection = detections[i];
-      final coordinates = detection['coordinates'] as Map<String, dynamic>?;
-      if (coordinates == null) {
-        _logResultsPage('Detection $i: No coordinates found');
+      final coords = _resolveCoordinates(detection);
+      if (coords == null) {
+        _logResultsPage('Detection $i: No usable coordinates found');
         continue;
       }
 
-      final x1 = coordinates['x1'] as double? ?? 0.0;
-      final y1 = coordinates['y1'] as double? ?? 0.0;
-      final x2 = coordinates['x2'] as double? ?? 0.0;
-      final y2 = coordinates['y2'] as double? ?? 0.0;
-      final defectType = detection['defect_type'] as String? ?? 'Unknown';
-      final confidence = detection['confidence'] as double? ?? 0.0;
+      final double x1 = coords['x1']!;
+      final double y1 = coords['y1']!;
+      final double x2 = coords['x2']!;
+      final double y2 = coords['y2']!;
+      final String defectType =
+          (detection['defect_type'] ?? detection['label'] ?? 'Unknown').toString();
+      final double confidence = _normalizeConfidence(
+        detection['confidence'] ?? detection['score'] ?? detection['probability'],
+      );
 
       _logResultsPage('Detection $i: $defectType at ($x1, $y1, $x2, $y2) with confidence $confidence');
 
@@ -1956,7 +2172,8 @@ class DefectAnnotationPainter extends CustomPainter {
 
         // Removed numeric badge near tiny detections to avoid duplication
 
-        final labelText = '${i + 1}. $defectType (${(confidence * 100).toInt()}%)';
+        final labelText =
+            '${i + 1}. $defectType (${(confidence * 100).clamp(0, 100).toInt()}%)';
         textPainter.text = TextSpan(
           text: labelText,
           style: const TextStyle(
@@ -1992,7 +2209,8 @@ class DefectAnnotationPainter extends CustomPainter {
       // Removed numeric badge on boxes to avoid double counting visuals
 
       // Re-layout with descriptive label that mirrors the results list numbering
-      final labelText = '${i + 1}. $defectType (${(confidence * 100).toInt()}%)';
+      final labelText =
+          '${i + 1}. $defectType (${(confidence * 100).clamp(0, 100).toInt()}%)';
       textPainter.text = TextSpan(
         text: labelText,
         style: const TextStyle(
@@ -2029,14 +2247,10 @@ class DefectAnnotationPainter extends CustomPainter {
     double maxX = 0;
     double maxY = 0;
     for (final detection in detections) {
-      final coords = detection['coordinates'] as Map<String, dynamic>?;
+      final coords = _resolveCoordinates(detection);
       if (coords == null) continue;
-      final x1 = (coords['x1'] as num?)?.toDouble() ?? 0.0;
-      final y1 = (coords['y1'] as num?)?.toDouble() ?? 0.0;
-      final x2 = (coords['x2'] as num?)?.toDouble() ?? 0.0;
-      final y2 = (coords['y2'] as num?)?.toDouble() ?? 0.0;
-      maxX = [maxX, x1, x2].reduce((a, b) => a > b ? a : b);
-      maxY = [maxY, y1, y2].reduce((a, b) => a > b ? a : b);
+      maxX = [maxX, coords['x1']!, coords['x2']!].reduce((a, b) => a > b ? a : b);
+      maxY = [maxY, coords['y1']!, coords['y2']!].reduce((a, b) => a > b ? a : b);
     }
     maxX = math.max(0, maxX - minX);
     maxY = math.max(0, maxY - minY);
@@ -2046,6 +2260,99 @@ class DefectAnnotationPainter extends CustomPainter {
     }
     return Size(maxX, maxY);
   }
+
+  static Map<String, double>? _resolveCoordinates(dynamic detection) {
+    if (detection is! Map) return null;
+    final Map<dynamic, dynamic> map = detection;
+    final dynamic rawCoords = map['coordinates'] ?? map['defect_coordinates'];
+
+    Map<String, dynamic>? coords;
+    if (rawCoords is Map) {
+      coords = Map<String, dynamic>.from(rawCoords);
+    } else {
+      final dynamic bbox = map['bbox'] ?? map['box'];
+      if (bbox is List && bbox.length >= 4) {
+        coords = {
+          'x1': bbox[0],
+          'y1': bbox[1],
+          'x2': bbox[2],
+          'y2': bbox[3],
+        };
+      } else if (bbox is Map) {
+        coords = Map<String, dynamic>.from(bbox);
+      } else if (map.containsKey('x') && map.containsKey('y')) {
+        coords = {
+          'x1': map['x'],
+          'y1': map['y'],
+          'width': map['width'] ?? map['w'],
+          'height': map['height'] ?? map['h'],
+        };
+      } else if (map.containsKey('left') && map.containsKey('top')) {
+        coords = {
+          'x1': map['left'],
+          'y1': map['top'],
+          'x2': map['right'],
+          'y2': map['bottom'],
+          'width': map['width'] ?? map['w'],
+          'height': map['height'] ?? map['h'],
+        };
+      }
+    }
+
+    if (coords == null) return null;
+
+    final double x1 =
+        _parseDouble(coords['x1'] ?? coords['left'] ?? coords['xmin'] ?? coords['x']);
+    final double y1 =
+        _parseDouble(coords['y1'] ?? coords['top'] ?? coords['ymin'] ?? coords['y']);
+    double x2 = _parseDouble(coords['x2'] ?? coords['right'] ?? coords['xmax']);
+    double y2 = _parseDouble(coords['y2'] ?? coords['bottom'] ?? coords['ymax']);
+    final double width = _parseDouble(coords['width'] ?? coords['w']);
+    final double height = _parseDouble(coords['height'] ?? coords['h']);
+
+    if ((x2 <= x1 || !x2.isFinite) && width > 0) {
+      x2 = x1 + width;
+    }
+    if ((y2 <= y1 || !y2.isFinite) && height > 0) {
+      y2 = y1 + height;
+    }
+
+    return {
+      'x1': x1,
+      'y1': y1,
+      'x2': x2,
+      'y2': y2,
+    };
+  }
+
+  static double _parseDouble(dynamic value, [double fallback = 0.0]) {
+    if (value == null) return fallback;
+    if (value is num) return value.toDouble();
+    if (value is String) {
+      final trimmed = value.trim();
+      if (trimmed.isEmpty) return fallback;
+      final cleaned = trimmed.replaceAll(RegExp(r'[^0-9\.\-]'), '');
+      if (cleaned.isEmpty) return fallback;
+      return double.tryParse(cleaned) ?? fallback;
+    }
+    return fallback;
+  }
+
+  static double _normalizeConfidence(dynamic value) {
+    final double parsed = _parseDouble(value);
+    if (parsed > 1.0) {
+      return (parsed / 100.0).clamp(0.0, 1.0);
+    }
+    if (parsed < 0.0) {
+      return 0.0;
+    }
+    return parsed;
+  }
 }
+
+
+
+
+
 
 
