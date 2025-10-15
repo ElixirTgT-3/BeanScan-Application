@@ -1,5 +1,4 @@
-import 'package:flutter/material.dart';
-import '../utils/app_colors.dart';
+﻿import 'package:flutter/material.dart';
 
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key});
@@ -7,43 +6,64 @@ class AboutPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final currentYear = DateTime.now().year;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final background = theme.scaffoldBackgroundColor;
+    final isDark = colorScheme.brightness == Brightness.dark;
+
     return Scaffold(
-      backgroundColor: AppColors.lightBeige,
+      backgroundColor: background,
       appBar: AppBar(
-        title: const Text('About BeanScan'),
-        backgroundColor: AppColors.lightBeige,
-        foregroundColor: AppColors.primaryBrown,
+        title: Text(
+          'About BeanScan',
+          style: theme.textTheme.titleMedium?.copyWith(
+            color: colorScheme.primary,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        backgroundColor: background,
+        foregroundColor: colorScheme.primary,
         elevation: 0,
       ),
       body: ListView(
         padding: const EdgeInsets.all(24),
         children: [
-          _HeroHeader(currentYear: currentYear),
+          _HeroHeader(
+            currentYear: currentYear,
+            colorScheme: colorScheme,
+            isDark: isDark,
+          ),
           const SizedBox(height: 24),
-          const _InfoTile(
+          _InfoTile(
             icon: Icons.assistant_photo_outlined,
             title: 'Mission',
             body:
-                'BeanScan empowers coffee professionals to classify bean varieties, identify defects, and estimate shelf life within seconds—right from a mobile device.',
+                'BeanScan helps coffee professionals classify bean varieties, flag defects, and estimate shelf life in seconds using a mobile device.',
+            colorScheme: colorScheme,
+            isDark: isDark,
           ),
           const SizedBox(height: 16),
-          const _InfoTile(
+          _InfoTile(
             icon: Icons.emoji_objects_outlined,
             title: 'Tech Stack',
             body:
-                '• Flutter mobile app with adaptive UI.\n'
-                '• PyTorch models for classification and detection.\n'
-                '• FastAPI backend paired with Supabase history storage.',
+                '- Flutter mobile app with adaptive UI.\n'
+                '- PyTorch models for classification and detection.\n'
+                '- FastAPI backend paired with Supabase history storage.',
+            colorScheme: colorScheme,
+            isDark: isDark,
           ),
           const SizedBox(height: 16),
-          const _InfoTile(
+          _InfoTile(
             icon: Icons.people_outline,
             title: 'Community',
             body:
                 'Thousands of roasters and graders rely on BeanScan to keep shipments consistent and reduce manual inspection time.',
+            colorScheme: colorScheme,
+            isDark: isDark,
           ),
           const SizedBox(height: 24),
-          const _ContactCard(),
+          _ContactCard(colorScheme: colorScheme),
         ],
       ),
     );
@@ -52,19 +72,31 @@ class AboutPage extends StatelessWidget {
 
 class _HeroHeader extends StatelessWidget {
   final int currentYear;
+  final ColorScheme colorScheme;
+  final bool isDark;
 
-  const _HeroHeader({required this.currentYear});
+  const _HeroHeader({
+    required this.currentYear,
+    required this.colorScheme,
+    required this.isDark,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final primary = colorScheme.primary;
+    final subtitleColor = colorScheme.onSurfaceVariant;
+    final shadowColor = isDark
+        ? Colors.black.withValues(alpha: 0.35)
+        : primary.withValues(alpha: 0.12);
+
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: colorScheme.surface,
         borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
-            color: Colors.brown.withOpacity(0.08),
+            color: shadowColor,
             blurRadius: 20,
             offset: const Offset(0, 8),
           ),
@@ -76,12 +108,12 @@ class _HeroHeader extends StatelessWidget {
             width: 64,
             height: 64,
             decoration: BoxDecoration(
-              color: AppColors.primaryBrown.withOpacity(0.12),
+              color: primary.withValues(alpha: isDark ? 0.25 : 0.12),
               borderRadius: BorderRadius.circular(20),
             ),
-            child: const Icon(
+            child: Icon(
               Icons.local_cafe_outlined,
-              color: AppColors.primaryBrown,
+              color: primary,
               size: 32,
             ),
           ),
@@ -90,19 +122,19 @@ class _HeroHeader extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'BeanScan',
                   style: TextStyle(
                     fontSize: 24,
                     fontWeight: FontWeight.w800,
-                    color: AppColors.primaryBrown,
+                    color: primary,
                   ),
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  'Version 1.0.0 • © $currentYear BeanScan Labs',
-                  style: const TextStyle(
-                    color: AppColors.textGrey,
+                  'Version 1.0.0 (c) $currentYear BeanScan Labs',
+                  style: TextStyle(
+                    color: subtitleColor,
                   ),
                 ),
               ],
@@ -118,21 +150,29 @@ class _InfoTile extends StatelessWidget {
   final IconData icon;
   final String title;
   final String body;
+  final ColorScheme colorScheme;
+  final bool isDark;
 
   const _InfoTile({
     required this.icon,
     required this.title,
     required this.body,
+    required this.colorScheme,
+    required this.isDark,
   });
 
   @override
   Widget build(BuildContext context) {
+    final primary = colorScheme.primary;
+    final subtitleColor = colorScheme.onSurfaceVariant;
+    final borderColor = colorScheme.outline.withValues(alpha: isDark ? 0.45 : 0.25);
+
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: colorScheme.surface,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.dividerGrey.withOpacity(0.5)),
+        border: Border.all(color: borderColor),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -141,12 +181,12 @@ class _InfoTile extends StatelessWidget {
             width: 40,
             height: 40,
             decoration: BoxDecoration(
-              color: AppColors.primaryBrown.withOpacity(0.12),
+              color: primary.withValues(alpha: isDark ? 0.25 : 0.12),
               borderRadius: BorderRadius.circular(14),
             ),
             child: Icon(
               icon,
-              color: AppColors.primaryBrown,
+              color: primary,
               size: 24,
             ),
           ),
@@ -157,17 +197,17 @@ class _InfoTile extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontWeight: FontWeight.w700,
                     fontSize: 17,
-                    color: AppColors.primaryBrown,
+                    color: primary,
                   ),
                 ),
                 const SizedBox(height: 8),
                 Text(
                   body,
-                  style: const TextStyle(
-                    color: AppColors.textDarkGrey,
+                  style: TextStyle(
+                    color: subtitleColor,
                     height: 1.5,
                   ),
                 ),
@@ -181,18 +221,20 @@ class _InfoTile extends StatelessWidget {
 }
 
 class _ContactCard extends StatelessWidget {
-  const _ContactCard();
+  final ColorScheme colorScheme;
+
+  const _ContactCard({required this.colorScheme});
 
   @override
   Widget build(BuildContext context) {
+    final gradientStart = colorScheme.primary;
+    final gradientEnd = colorScheme.primary.withValues(alpha: 0.8);
+
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: [
-            AppColors.primaryBrown.withOpacity(0.9),
-            AppColors.primaryBrown.withOpacity(0.75),
-          ],
+          colors: [gradientStart, gradientEnd],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
@@ -205,7 +247,7 @@ class _ContactCard extends StatelessWidget {
             width: 44,
             height: 44,
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.2),
+              color: Colors.white.withValues(alpha: 0.2),
               borderRadius: BorderRadius.circular(16),
             ),
             child: const Icon(
@@ -220,7 +262,7 @@ class _ContactCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: const [
                 Text(
-                  'Let’s Stay Connected',
+                  "Let's Stay Connected",
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 18,

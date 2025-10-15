@@ -1,18 +1,44 @@
-import 'package:flutter/material.dart';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_file_dialog/flutter_file_dialog.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:permission_handler/permission_handler.dart';
+import 'package:share_plus/share_plus.dart';
+
 import '../utils/app_colors.dart';
 import '../utils/app_constants.dart';
 import '../utils/api_service.dart';
+import '../utils/app_logger.dart';
 import '../widgets/bean_severity_icon.dart';
 
 enum ResultsNavigationAction { scan, history }
 
+void _logResultsPage(
+  String message, {
+  Object? error,
+  StackTrace? stackTrace,
+}) {
+  logDebug(
+    'ResultsPage',
+    message,
+    error: error,
+    stackTrace: stackTrace,
+  );
+}
+
 class ResultsPage extends StatelessWidget {
+  static final Expando<bool> _autoSaveGuard = Expando<bool>();
   final BeanPrediction prediction;
   final String imagePath;
   final Map<String, dynamic>? defectDetection;
   final Map<String, dynamic>? shelfLife;
+  final bool shouldAutoSave;
+  final bool fromHistory;
 
   const ResultsPage({
     super.key,
@@ -20,33 +46,44 @@ class ResultsPage extends StatelessWidget {
     required this.imagePath,
     this.defectDetection,
     this.shelfLife,
+    this.shouldAutoSave = false,
+    this.fromHistory = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    // Debug prints to see what data we're receiving
-    print('🔍 ResultsPage Debug:');
-    print('  - prediction: $prediction');
-    print('  - imagePath: $imagePath');
-    print('  - defectDetection: $defectDetection');
-    print('  - shelfLife: $shelfLife');
-    
-    
+    // Debug log to see what data we're receiving
+    _logResultsPage(
+      'ResultsPage Debug:\n'
+      '  - prediction: $prediction\n'
+      '  - imagePath: $imagePath\n'
+      '  - defectDetection: $defectDetection\n'
+      '  - shelfLife: $shelfLife',
+    );
+
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final textTheme = theme.textTheme;
+    final scaffoldBackground = theme.scaffoldBackgroundColor;
+
+    if (shouldAutoSave && (_autoSaveGuard[this] != true)) {
+      _autoSaveGuard[this] = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _downloadResultPdf(context, silent: true);
+      });
+    }
 
     return Scaffold(
-      backgroundColor: colorScheme.background,
+      backgroundColor: scaffoldBackground,
       appBar: AppBar(
-        backgroundColor: colorScheme.background,
+        backgroundColor: scaffoldBackground,
         elevation: 0,
         leading: IconButton(
           icon: Icon(Icons.arrow_back, color: colorScheme.primary),
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: Text(
-          'Scanned Coffee Bean Result',
+          fromHistory ? 'Coffee Bean History Record' : 'Scanned Coffee Bean Result',
           style: textTheme.titleMedium?.copyWith(color: colorScheme.primary, fontWeight: FontWeight.w700),
         ),
         centerTitle: false,
@@ -59,7 +96,7 @@ class ResultsPage extends StatelessWidget {
             children: [
               _buildImagePreview(context, colorScheme),
               const SizedBox(height: AppConstants.largeSpacing),
-              _buildInfoCard(colorScheme, textTheme),
+              _buildInfoCard(context, colorScheme, textTheme),
               const SizedBox(height: AppConstants.largeSpacing),
               if (defectDetection != null) ...[
                 _buildDefectDetectionCard(colorScheme),
@@ -67,20 +104,664 @@ class ResultsPage extends StatelessWidget {
               ],
               _buildSeverityAndDefectiveTiles(colorScheme),
               const SizedBox(height: AppConstants.largeSpacing),
-              const Text(
-                'Scan another image?',
-                style: TextStyle(
-                  color: AppColors.primaryBrown,
-                  fontWeight: FontWeight.w600,
+              if (!fromHistory) ...[
+                Text(
+                  'Scan another image?',
+                  style: textTheme.titleSmall?.copyWith(
+                    color: colorScheme.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              ),
-              const SizedBox(height: AppConstants.smallSpacing),
-              _buildYesNoButtons(context),
+                const SizedBox(height: AppConstants.smallSpacing),
+                _buildYesNoButtons(context),
+              ],
             ],
           ),
         ),
       ),
     );
+  }
+
+  Future<void> _downloadResultPdf(BuildContext context, {bool silent = false}) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+
+    try {
+      final now = DateTime.now();
+      final dateLabel =
+          '${now.month.toString().padLeft(2, '0')}/${now.day.toString().padLeft(2, '0')}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+      final shelfLifeData =
+          shelfLife != null ? Map<String, dynamic>.from(shelfLife!) : null;
+      final defectSummary = _getDefectSummary();
+      final detections = _getDetections();
+      final probabilityEntries = prediction.allProbabilities.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+
+      final doc = pw.Document();
+      final sectionTitleStyle =
+          pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold);
+      final bodyStyle = pw.TextStyle(fontSize: 12, color: PdfColors.grey800);
+      final accentStyle = bodyStyle.copyWith(fontWeight: pw.FontWeight.bold);
+      final tableHeaderStyle = pw.TextStyle(
+        fontSize: 11,
+        fontWeight: pw.FontWeight.bold,
+        color: PdfColors.white,
+      );
+
+      doc.addPage(
+        pw.MultiPage(
+          pageTheme: pw.PageTheme(
+            margin: const pw.EdgeInsets.all(32),
+          ),
+          build: (pw.Context _) {
+            final widgets = <pw.Widget>[
+              pw.Text(
+                'BeanScan Analysis Report',
+                style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold),
+              ),
+              pw.SizedBox(height: 6),
+              pw.Text(
+                'Generated on $dateLabel',
+                style: bodyStyle.copyWith(color: PdfColors.grey600),
+              ),
+              pw.SizedBox(height: 20),
+              pw.Text('Classification', style: sectionTitleStyle),
+              pw.SizedBox(height: 6),
+              pw.Bullet(
+                text: 'Predicted type: ${prediction.prediction}',
+                style: bodyStyle,
+              ),
+              pw.Bullet(
+                text: 'Confidence: ${(prediction.confidence * 100).toStringAsFixed(1)}%',
+                style: bodyStyle,
+              ),
+            ];
+
+            if (probabilityEntries.isNotEmpty) {
+              widgets.add(pw.SizedBox(height: 10));
+              widgets.add(
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text('Class probabilities', style: accentStyle),
+                    pw.SizedBox(height: 4),
+                    pw.Table(
+                      border: pw.TableBorder.symmetric(
+                        inside: const pw.BorderSide(
+                          color: PdfColors.grey400,
+                          width: 0.3,
+                        ),
+                        outside: const pw.BorderSide(
+                          color: PdfColors.grey400,
+                          width: 0.5,
+                        ),
+                      ),
+                      columnWidths: const {
+                        0: pw.FlexColumnWidth(2),
+                        1: pw.FlexColumnWidth(1),
+                      },
+                      children: [
+                        pw.TableRow(
+                          decoration: const pw.BoxDecoration(
+                            color: PdfColors.blueGrey700,
+                          ),
+                          children: [
+                            pw.Padding(
+                              padding: const pw.EdgeInsets.symmetric(
+                                vertical: 4,
+                                horizontal: 6,
+                              ),
+                              child: pw.Text('Class', style: tableHeaderStyle),
+                            ),
+                            pw.Padding(
+                              padding: const pw.EdgeInsets.symmetric(
+                                vertical: 4,
+                                horizontal: 6,
+                              ),
+                              child:
+                                  pw.Text('Confidence', style: tableHeaderStyle),
+                            ),
+                          ],
+                        ),
+                        ...probabilityEntries.map(
+                          (entry) => pw.TableRow(
+                            children: [
+                              pw.Padding(
+                                padding: const pw.EdgeInsets.symmetric(
+                                  vertical: 4,
+                                  horizontal: 6,
+                                ),
+                                child: pw.Text(
+                                  _formatDefectType(entry.key),
+                                  style: bodyStyle,
+                                ),
+                              ),
+                              pw.Padding(
+                                padding: const pw.EdgeInsets.symmetric(
+                                  vertical: 4,
+                                  horizontal: 6,
+                                ),
+                                child: pw.Text(
+                                  '${(entry.value * 100).toStringAsFixed(1)}%',
+                                  style: bodyStyle,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            if (shelfLifeData != null && shelfLifeData.isNotEmpty) {
+              final double? predictedDays =
+                  (shelfLifeData['predicted_days'] as num?)?.toDouble();
+              final double? estimatedMonths =
+                  (shelfLifeData['estimated_months'] as num?)?.toDouble();
+              final Map<String, dynamic>? monthsRange =
+                  shelfLifeData['estimated_months_range'] is Map
+                      ? Map<String, dynamic>.from(
+                          shelfLifeData['estimated_months_range'] as Map,
+                        )
+                      : null;
+              final double? shelfConfidence =
+                  (shelfLifeData['confidence_score'] ??
+                          shelfLifeData['confidence']) is num
+                      ? ((shelfLifeData['confidence_score'] ??
+                              shelfLifeData['confidence']) as num)
+                          .toDouble()
+                      : null;
+              final String status = _resolveStatus(
+                category: shelfLifeData['category'] as String?,
+                severity: (shelfLifeData['severity'] as String?) ??
+                    (defectSummary?['severity'] as String?),
+                predictedDays: shelfLifeData['predicted_days'] as num?,
+              );
+
+              widgets.add(pw.SizedBox(height: 18));
+              widgets.add(pw.Text('Shelf life', style: sectionTitleStyle));
+              widgets.add(pw.SizedBox(height: 6));
+              final shelfLines = <String>[
+                if (predictedDays != null)
+                  'Predicted days: ${predictedDays.toStringAsFixed(0)}',
+                if (estimatedMonths != null)
+                  'Estimated months: ${_formatMonthsText(estimatedMonths, monthsRange)}',
+                if (shelfConfidence != null)
+                  'Model confidence: ${(shelfConfidence * 100).clamp(0, 100).toStringAsFixed(1)}%',
+                if (shelfLifeData['severity'] != null)
+                  'Severity: ${_formatDefectType((shelfLifeData['severity'] as String?) ?? '')}',
+                if (status.isNotEmpty) 'Status: $status',
+              ];
+              widgets.add(
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: shelfLines
+                      .where((line) => line.isNotEmpty)
+                      .map((line) => pw.Text(line, style: bodyStyle))
+                      .toList(),
+                ),
+              );
+            }
+
+            if (defectSummary != null && defectSummary.isNotEmpty) {
+              final Map<String, int> defectTypes = {};
+              final rawTypes = defectSummary['defect_types'];
+              if (rawTypes is Map) {
+                rawTypes.forEach((key, value) {
+                  if (value is num) {
+                    defectTypes[key.toString()] = value.toInt();
+                  }
+                });
+              }
+
+              widgets.add(pw.SizedBox(height: 18));
+              widgets.add(pw.Text('Defect summary', style: sectionTitleStyle));
+              widgets.add(pw.SizedBox(height: 6));
+              widgets.add(
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    if (defectSummary['quality_grade'] != null)
+                      pw.Text(
+                        'Quality grade: ${defectSummary['quality_grade']}',
+                        style: bodyStyle,
+                      ),
+                    if (defectSummary['total_defects'] != null)
+                      pw.Text(
+                        'Total defects detected: ${(defectSummary['total_defects'] as num).toInt()}',
+                        style: bodyStyle,
+                      ),
+                    if (defectSummary['defect_percentage'] != null)
+                      pw.Text(
+                        'Defect percentage: ${((defectSummary['defect_percentage'] as num?)?.toDouble() ?? 0).toStringAsFixed(1)}%',
+                        style: bodyStyle,
+                      ),
+                    if (defectSummary['severity'] != null)
+                      pw.Text(
+                        'Severity: ${_formatDefectType((defectSummary['severity'] as String?) ?? '')}',
+                        style: bodyStyle,
+                      ),
+                  ],
+                ),
+              );
+
+              if (defectTypes.isNotEmpty) {
+                widgets.add(pw.SizedBox(height: 8));
+                widgets.add(
+                  pw.Table(
+                    border: pw.TableBorder.symmetric(
+                      inside: const pw.BorderSide(
+                        color: PdfColors.grey400,
+                        width: 0.3,
+                      ),
+                      outside: const pw.BorderSide(
+                        color: PdfColors.grey400,
+                        width: 0.5,
+                      ),
+                    ),
+                    columnWidths: const {
+                      0: pw.FlexColumnWidth(3),
+                      1: pw.FlexColumnWidth(1),
+                    },
+                    children: [
+                      pw.TableRow(
+                        decoration: const pw.BoxDecoration(
+                          color: PdfColors.blueGrey700,
+                        ),
+                        children: [
+                          pw.Padding(
+                            padding: const pw.EdgeInsets.symmetric(
+                              vertical: 4,
+                              horizontal: 6,
+                            ),
+                            child: pw.Text(
+                              'Defect type',
+                              style: tableHeaderStyle,
+                            ),
+                          ),
+                          pw.Padding(
+                            padding: const pw.EdgeInsets.symmetric(
+                              vertical: 4,
+                              horizontal: 6,
+                            ),
+                            child: pw.Text('Count', style: tableHeaderStyle),
+                          ),
+                        ],
+                      ),
+                      ...defectTypes.entries.map(
+                        (entry) => pw.TableRow(
+                          children: [
+                            pw.Padding(
+                              padding: const pw.EdgeInsets.symmetric(
+                                vertical: 4,
+                                horizontal: 6,
+                              ),
+                              child:
+                                  pw.Text(entry.key, style: bodyStyle),
+                            ),
+                            pw.Padding(
+                              padding: const pw.EdgeInsets.symmetric(
+                                vertical: 4,
+                                horizontal: 6,
+                              ),
+                              child: pw.Text(
+                                entry.value.toString(),
+                                style: bodyStyle,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+            }
+
+            if (detections.isNotEmpty) {
+              widgets.add(pw.SizedBox(height: 18));
+              widgets.add(pw.Text('Detections', style: sectionTitleStyle));
+              widgets.add(pw.SizedBox(height: 6));
+              widgets.add(
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: detections.asMap().entries.map((entry) {
+                    final index = entry.key + 1;
+                    final detection =
+                        Map<String, dynamic>.from(entry.value as Map);
+                    final type = _formatDefectType(
+                      (detection['defect_type'] as String?) ?? 'Unknown',
+                    );
+                    final confidence =
+                        ((detection['confidence'] as num?)?.toDouble() ?? 0.0) *
+                            100;
+                    return pw.Bullet(
+                      text:
+                          '$index. $type — ${confidence.toStringAsFixed(1)}% confidence',
+                      style: bodyStyle,
+                    );
+                  }).toList(),
+                ),
+              );
+            }
+
+            return widgets;
+          },
+        ),
+      );
+
+      final pdfBytes = await doc.save();
+
+      String sanitizedPrediction = prediction.prediction
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^a-z0-9]+'), '_');
+      sanitizedPrediction =
+          sanitizedPrediction.replaceAll(RegExp('_+'), '_').replaceAll(RegExp(r'^_|_$'), '');
+      final timestamp =
+          '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}';
+      final baseFileName = [
+        'beanscan_result',
+        if (sanitizedPrediction.isNotEmpty) sanitizedPrediction,
+        timestamp,
+      ].join('_');
+      final fileName = '$baseFileName.pdf';
+
+      final tempDir = await getTemporaryDirectory();
+      final tempPath = '${tempDir.path}${Platform.pathSeparator}$fileName';
+      final tempFile = File(tempPath);
+      await tempFile.writeAsBytes(pdfBytes, flush: true);
+
+      bool savedViaDialog = false;
+
+      if (!silent && (Platform.isAndroid || Platform.isIOS)) {
+        try {
+          final params = SaveFileDialogParams(
+            sourceFilePath: tempFile.path,
+            fileName: fileName,
+            mimeTypesFilter: const ['application/pdf'],
+          );
+          final savedPath = await FlutterFileDialog.saveFile(params: params);
+          if (savedPath != null && savedPath.isNotEmpty) {
+            messenger?.showSnackBar(
+              SnackBar(
+                content: Text('Report saved: $savedPath'),
+                duration: const Duration(seconds: 5),
+              ),
+            );
+            savedViaDialog = true;
+          }
+        } catch (e, stackTrace) {
+          _logResultsPage(
+            'Save dialog failed',
+            error: e,
+            stackTrace: stackTrace,
+          );
+        }
+      }
+
+      if (savedViaDialog) {
+        try {
+          if (await tempFile.exists()) {
+            await tempFile.delete();
+          }
+        } catch (e, stackTrace) {
+          _logResultsPage(
+            'Failed to delete temp PDF after dialog save',
+            error: e,
+            stackTrace: stackTrace,
+          );
+        }
+        return;
+      }
+
+      File? savedFile;
+      bool savedToPublicDownloads = false;
+      bool usedFallbackStorage = false;
+
+      Directory? primaryDirectory;
+
+      if (Platform.isAndroid) {
+        if (!await _ensureAndroidStoragePermissions(messenger)) {
+          return;
+        }
+
+        final downloadsDir = await _getAndroidDownloadsDirectory();
+        if (downloadsDir != null) {
+          primaryDirectory = Directory(
+            '${downloadsDir.path}${Platform.pathSeparator}BeanScan Reports',
+          );
+          savedToPublicDownloads = true;
+        } else {
+          usedFallbackStorage = true;
+          _logResultsPage('Downloads directory not accessible; will use app documents directory.');
+        }
+      }
+
+      final fallbackDirectory = await getApplicationDocumentsDirectory();
+      primaryDirectory ??= fallbackDirectory;
+
+      savedFile = await _tryWritePdf(pdfBytes, primaryDirectory, fileName);
+
+      if (savedFile == null && savedToPublicDownloads) {
+        usedFallbackStorage = true;
+        savedToPublicDownloads = false;
+        savedFile = await _tryWritePdf(pdfBytes, fallbackDirectory, fileName);
+      }
+
+      savedFile ??= await _tryWritePdf(pdfBytes, fallbackDirectory, fileName);
+
+      if (savedFile == null) {
+        throw Exception('Unable to save the PDF report.');
+      }
+
+      final message = savedToPublicDownloads
+          ? 'Report saved to ${savedFile.path}'
+          : usedFallbackStorage
+              ? 'Downloads unavailable; report saved to ${savedFile.path}'
+              : 'Report saved to ${savedFile.path}';
+
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+
+      if (!silent) {
+        try {
+          await Share.shareXFiles(
+            [XFile(savedFile.path)],
+            text: 'BeanScan report for ${prediction.prediction}',
+            subject: 'BeanScan Analysis Report',
+          );
+        } catch (e, stackTrace) {
+          _logResultsPage(
+            'Failed to share PDF report',
+            error: e,
+            stackTrace: stackTrace,
+          );
+        }
+      }
+
+      try {
+        if (await tempFile.exists()) {
+          await tempFile.delete();
+        }
+      } catch (e, stackTrace) {
+        _logResultsPage(
+          'Failed to delete temp PDF',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    } catch (e, stackTrace) {
+      _logResultsPage(
+        'Failed to generate PDF',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text('Could not save PDF report: $e'),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    }
+  }
+
+  Future<bool> _ensureAndroidStoragePermissions(ScaffoldMessengerState? messenger) async {
+    try {
+      var storageStatus = await Permission.storage.status;
+      if (!storageStatus.isGranted) {
+        storageStatus = await Permission.storage.request();
+      }
+
+      PermissionStatus? manageStatus;
+      if (!storageStatus.isGranted) {
+        try {
+          manageStatus = await Permission.manageExternalStorage.status;
+          if (!manageStatus.isGranted) {
+            manageStatus = await Permission.manageExternalStorage.request();
+          }
+        } catch (e, stackTrace) {
+          _logResultsPage(
+            'manageExternalStorage permission check failed',
+            error: e,
+            stackTrace: stackTrace,
+          );
+        }
+      }
+
+      final hasAccess =
+          storageStatus.isGranted || (manageStatus?.isGranted ?? false);
+
+      if (!hasAccess) {
+        final permanentlyDenied =
+            storageStatus.isPermanentlyDenied || (manageStatus?.isPermanentlyDenied ?? false);
+        messenger?.showSnackBar(
+          SnackBar(
+            content: const Text('Storage permission is required to save reports to Downloads.'),
+            action: permanentlyDenied
+                ? SnackBarAction(
+                    label: 'Settings',
+                    onPressed: () => openAppSettings(),
+                  )
+                : null,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+
+      return hasAccess;
+    } catch (e, stackTrace) {
+      _logResultsPage(
+        'Failed to request storage permissions',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text('Unable to request storage permission: $e'),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+      return false;
+    }
+  }
+
+  Future<Directory?> _getAndroidDownloadsDirectory() async {
+    final List<String> candidatePaths = [];
+
+    void addCandidate(String path) {
+      if (path.isEmpty) return;
+      if (!candidatePaths.contains(path)) {
+        candidatePaths.add(path);
+      }
+    }
+
+    const manualFallbacks = [
+      '/storage/emulated/0/Download',
+      '/storage/emulated/0/Downloads',
+      '/sdcard/Download',
+      '/sdcard/Downloads',
+    ];
+    for (final path in manualFallbacks) {
+      addCandidate(path);
+    }
+
+    try {
+      final externalDirs = await getExternalStorageDirectories();
+      if (externalDirs != null) {
+        for (final dir in externalDirs) {
+          final path = dir.path;
+          final androidIndex = path.indexOf('${Platform.pathSeparator}Android${Platform.pathSeparator}');
+          if (androidIndex != -1) {
+            final root = path.substring(0, androidIndex);
+            addCandidate('$root${Platform.pathSeparator}Download');
+            addCandidate('$root${Platform.pathSeparator}Downloads');
+          }
+        }
+      }
+    } catch (e, stackTrace) {
+      _logResultsPage(
+        'Error sampling external storage root for downloads',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+
+    try {
+      final downloadsDirs = await getExternalStorageDirectories(
+        type: StorageDirectory.downloads,
+      );
+      if (downloadsDirs != null) {
+        for (final dir in downloadsDirs) {
+          addCandidate(dir.path);
+        }
+      }
+    } catch (e, stackTrace) {
+      _logResultsPage(
+        'Error fetching external downloads directories',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+
+    for (final path in candidatePaths) {
+      final directory = Directory(path);
+      try {
+        if (await directory.exists()) {
+          return directory;
+        }
+      } catch (e, stackTrace) {
+        _logResultsPage(
+          'Error checking downloads directory candidate "$path"',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+
+    return null;
+  }
+
+  Future<File?> _tryWritePdf(Uint8List bytes, Directory directory, String fileName) async {
+    try {
+      await directory.create(recursive: true);
+      final filePath = '${directory.path}${Platform.pathSeparator}$fileName';
+      final file = File(filePath);
+      await file.writeAsBytes(bytes, flush: true);
+      return file;
+    } catch (e, stackTrace) {
+      _logResultsPage(
+        'Failed to write PDF to ${directory.path}',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
   }
 
   Widget _buildImagePreview(BuildContext context, ColorScheme colorScheme) {
@@ -89,13 +770,16 @@ class ResultsPage extends StatelessWidget {
         height: 220,
         width: double.infinity,
         decoration: BoxDecoration(
-          color: colorScheme.surfaceVariant,
+          color: colorScheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(AppConstants.largeRadius),
-          border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
+          border: Border.all(
+            color: colorScheme.outline.withValues(alpha: 0.3),
+            width: AppConstants.thinBorder,
+          ),
         ),
         clipBehavior: Clip.antiAlias,
         child: Center(
-          child: Icon(Icons.image, color: colorScheme.onSurface.withOpacity(0.54), size: 48),
+          child: Icon(Icons.image, color: colorScheme.onSurface.withValues(alpha: 0.54), size: 48),
         ),
       );
     }
@@ -134,9 +818,12 @@ class ResultsPage extends StatelessWidget {
       height: 220,
       width: double.infinity,
       decoration: BoxDecoration(
-        color: colorScheme.surfaceVariant,
+        color: colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(AppConstants.largeRadius),
-        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
+        border: Border.all(
+          color: colorScheme.outline.withValues(alpha: 0.3),
+          width: AppConstants.thinBorder,
+        ),
       ),
       clipBehavior: Clip.antiAlias,
       child: ClipRRect(
@@ -147,11 +834,11 @@ class ResultsPage extends StatelessWidget {
   }
 
   Widget _buildImageWidget(BuildContext context, ColorScheme colorScheme, {BoxFit fit = BoxFit.cover}) {
-    print('🔍 _buildImageWidget - imagePath: $imagePath');
+    _logResultsPage('🔍 _buildImageWidget - imagePath: $imagePath');
     final isHttp = imagePath.startsWith('http');
     final isAbsolutePath = imagePath.startsWith('/') || imagePath.startsWith('http');
     final String url = imagePath.startsWith('/') ? (ApiService.apiUrl + imagePath) : imagePath;
-    print('🔍 _buildImageWidget - isHttp: $isHttp, isAbsolutePath: $isAbsolutePath, url: $url');
+    _logResultsPage('🔍 _buildImageWidget - isHttp: $isHttp, isAbsolutePath: $isAbsolutePath, url: $url');
     
     if (isHttp || imagePath.startsWith('/')) {
       return Image.network(
@@ -160,11 +847,11 @@ class ResultsPage extends StatelessWidget {
         width: double.infinity,
         height: double.infinity,
         errorBuilder: (c, e, s) {
-          print('🔍 Image.network error: $e');
+          _logResultsPage('🔍 Image.network error: $e');
           return Center(
             child: Icon(
               Icons.broken_image,
-              color: colorScheme.onSurface.withOpacity(0.54),
+              color: colorScheme.onSurface.withValues(alpha: 0.54),
               size: 48,
             ),
           );
@@ -183,11 +870,11 @@ class ResultsPage extends StatelessWidget {
       width: double.infinity,
       height: double.infinity,
       errorBuilder: (c, e, s) {
-        print('🔍 Image.file error: $e');
+        _logResultsPage('🔍 Image.file error: $e');
         return Center(
           child: Icon(
             Icons.broken_image,
-            color: colorScheme.onSurface.withOpacity(0.54),
+            color: colorScheme.onSurface.withValues(alpha: 0.54),
             size: 48,
           ),
         );
@@ -202,9 +889,9 @@ class ResultsPage extends StatelessWidget {
     }
 
     // Debug: Print detection data
-    print('Defect detections: ${detections.length}');
+    _logResultsPage('Defect detections: ${detections.length}');
     for (int i = 0; i < detections.length; i++) {
-      print('Detection $i: ${detections[i]}');
+      _logResultsPage('Detection $i: ${detections[i]}');
     }
 
     return CustomPaint(
@@ -251,7 +938,7 @@ class ResultsPage extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
-          color: Colors.red.withOpacity(0.8),
+          color: Colors.red.withValues(alpha: 0.8),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Text(
@@ -266,29 +953,42 @@ class ResultsPage extends StatelessWidget {
     );
   }
 
-  Widget _buildInfoCard(ColorScheme colorScheme, TextTheme textTheme) {
+  Widget _buildInfoCard(BuildContext context, ColorScheme colorScheme, TextTheme textTheme) {
     final DateTime now = DateTime.now();
     final String dateStr = '${now.month}/${now.day}/${now.year} - ${now.hour}:${now.minute.toString().padLeft(2, '0')}';
     final double healthyPct = (prediction.confidence * 100).clamp(0.0, 100.0);
     final Map<String, dynamic>? shelfLifeData = shelfLife != null
         ? Map<String, dynamic>.from(shelfLife!)
         : null;
-    final double? estimatedMonths = (shelfLifeData?['estimated_months'] as num?)?.toDouble();
-    final Map<String, dynamic>? monthsRange = shelfLifeData?['estimated_months_range'] is Map
-        ? Map<String, dynamic>.from(shelfLifeData!['estimated_months_range'] as Map)
-        : null;
+    double? predictedDays = _asDouble(shelfLifeData?['predicted_days']);
+    double? estimatedMonths = _asDouble(shelfLifeData?['estimated_months']);
+    if (estimatedMonths == null && predictedDays != null && predictedDays > 0) {
+      estimatedMonths = double.parse((predictedDays / 30.0).toStringAsFixed(1));
+    }
+    final Map<String, dynamic>? monthsRange = _normalizeMonthsRange(
+      shelfLifeData?['estimated_months_range'] is Map
+          ? Map<String, dynamic>.from(shelfLifeData!['estimated_months_range'] as Map)
+          : null,
+      estimatedMonths,
+    );
+    final int predictedDaysDisplay =
+        (predictedDays ?? _asDouble(shelfLifeData?['predicted_days']) ?? 0).round();
     final Map<String, dynamic>? defectSummary = _getDefectSummary();
     final String? severityLabel = (shelfLifeData?['severity'] as String?) ?? (defectSummary?['severity'] as String?);
     final double confidenceScore = shelfLifeData != null
-        ? (((shelfLifeData['confidence_score'] ?? shelfLifeData['confidence'] ?? 0.0) as num?)?.toDouble() ?? 0.0)
+        ? (_asDouble(shelfLifeData['confidence_score'] ?? shelfLifeData['confidence']) ?? 0.0)
         : (healthyPct / 100.0);
     final String statusLabel = _resolveStatus(
       category: shelfLifeData?['category'] as String?,
       severity: severityLabel,
-      predictedDays: shelfLifeData?['predicted_days'] as num?,
+      predictedDays: predictedDays,
     );
     final onSurface = colorScheme.onSurface;
     final surface = colorScheme.surface;
+    final isDark = colorScheme.brightness == Brightness.dark;
+    final borderColor = isDark ? colorScheme.outline.withValues(alpha: 0.4) : AppColors.dividerGrey;
+    final primaryTextColor = isDark ? colorScheme.onSurface : AppColors.textDarkGrey;
+    final dividerColor = isDark ? colorScheme.outline.withValues(alpha: 0.3) : AppColors.dividerGrey;
     final chipBackground = _getShelfLifeColor(
       colorScheme,
       (shelfLife?['category'] as String?) ?? _deriveShelfLifeCategory(shelfLife ?? {}),
@@ -300,7 +1000,7 @@ class ResultsPage extends StatelessWidget {
       decoration: BoxDecoration(
         color: surface,
         borderRadius: BorderRadius.circular(AppConstants.largeRadius),
-        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
+        border: Border.all(color: borderColor, width: AppConstants.thinBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -311,12 +1011,12 @@ class ResultsPage extends StatelessWidget {
                 child: Text(
                   dateStr,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: onSurface.withOpacity(0.7)),
+                  style: TextStyle(color: onSurface.withValues(alpha: 0.7)),
                 ),
               ),
               IconButton(
-                onPressed: () {},
-                icon: Icon(Icons.download, size: 18, color: onSurface.withOpacity(0.7)),
+                onPressed: () => _downloadResultPdf(context),
+                icon: Icon(Icons.download, size: 18, color: onSurface.withValues(alpha: 0.7)),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               ),
@@ -327,7 +1027,7 @@ class ResultsPage extends StatelessWidget {
             children: [
               Text(
                 'Type: ',
-                style: TextStyle(fontWeight: FontWeight.w600, color: onSurface.withOpacity(0.75)),
+                style: TextStyle(fontWeight: FontWeight.w600, color: onSurface.withValues(alpha: 0.75)),
               ),
               Text(
                 prediction.prediction,
@@ -337,14 +1037,14 @@ class ResultsPage extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Divider(
-            color: AppColors.dividerGrey,
+            color: dividerColor,
             height: 24,
           ),
           Text(
             'Estimated Shelf Life',
             style: TextStyle(
               fontWeight: FontWeight.w600,
-              color: onSurface.withOpacity(0.8),
+              color: onSurface.withValues(alpha: 0.8),
             ),
           ),
           const SizedBox(height: 8),
@@ -356,7 +1056,7 @@ class ResultsPage extends StatelessWidget {
               children: [
                 Text(
                   'Predicted Days:',
-                  style: TextStyle(fontWeight: FontWeight.w500, color: onSurface.withOpacity(0.75)),
+                  style: TextStyle(fontWeight: FontWeight.w500, color: onSurface.withValues(alpha: 0.75)),
                 ),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -365,7 +1065,7 @@ class ResultsPage extends StatelessWidget {
                     borderRadius: BorderRadius.circular(24),
                   ),
                   child: Text(
-                    '${shelfLife!['predicted_days'] ?? 0} days',
+                    '$predictedDaysDisplay days',
                     style: TextStyle(
                       color: chipBackground.computeLuminance() > 0.5 ? Colors.black87 : Colors.white,
                       fontWeight: FontWeight.w700,
@@ -378,20 +1078,35 @@ class ResultsPage extends StatelessWidget {
           if (estimatedMonths != null) ...[
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
-               children: [
-                 const Text('Estimated Months:', style: TextStyle(fontWeight: FontWeight.w500, color: AppColors.textDarkGrey)),
-                 Text(
-                   _formatMonthsText(estimatedMonths, monthsRange),
-                   style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.textDarkGrey),
-                 ),
-               ],
+              children: [
+                Text(
+                  'Estimated Months:',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w500,
+                    color: primaryTextColor.withValues(alpha: 0.75),
+                  ),
+                ),
+                Text(
+                  _formatMonthsText(estimatedMonths, monthsRange),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: primaryTextColor,
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 8),
           ],
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Status:', style: TextStyle(fontWeight: FontWeight.w500, color: AppColors.textDarkGrey)),
+              Text(
+                'Status:',
+                style: TextStyle(
+                  fontWeight: FontWeight.w500,
+                  color: primaryTextColor.withValues(alpha: 0.75),
+                ),
+              ),
               Text(
                 statusLabel,
                 style: TextStyle(
@@ -408,12 +1123,18 @@ class ResultsPage extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Confidence Score:', style: TextStyle(fontWeight: FontWeight.w600, color: AppColors.textDarkGrey)),
+              Text(
+                'Confidence Score:',
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  color: primaryTextColor,
+                ),
+              ),
               Text(
                 '${(confidenceScore * 100).clamp(0, 100).toStringAsFixed(0)}%',
-                style: const TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.w600,
-                  color: AppColors.textDarkGrey,
+                  color: primaryTextColor,
                   fontSize: 16,
                 ),
                ),
@@ -428,7 +1149,9 @@ class ResultsPage extends StatelessWidget {
     if (defectDetection == null) return const SizedBox.shrink();
     
     final summary = _getDefectSummary() ?? <String, dynamic>{};
-    final detections = _getDetections();
+    final isDark = colorScheme.brightness == Brightness.dark;
+    final borderColor = isDark ? colorScheme.outline.withValues(alpha: 0.4) : AppColors.dividerGrey;
+    final primaryTextColor = isDark ? colorScheme.onSurface : AppColors.textDarkGrey;
     
     return Container(
       width: double.infinity,
@@ -436,20 +1159,20 @@ class ResultsPage extends StatelessWidget {
       decoration: BoxDecoration(
         color: colorScheme.surface,
         borderRadius: BorderRadius.circular(AppConstants.largeRadius),
-        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
+        border: Border.all(color: borderColor, width: AppConstants.thinBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.bug_report, color: AppColors.primaryBrown, size: 20),
+              Icon(Icons.bug_report, color: colorScheme.primary, size: 20),
               const SizedBox(width: 8),
               Text(
                 'Defect Detection Results',
-                style: const TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.w600,
-                  color: AppColors.textDarkGrey,
+                  color: primaryTextColor,
                   fontSize: 16,
                 ),
               ),
@@ -461,12 +1184,15 @@ class ResultsPage extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Total Defects:', style: TextStyle(fontWeight: FontWeight.w500, color: AppColors.textDarkGrey)),
+              Text(
+                'Total Defects:',
+                style: TextStyle(fontWeight: FontWeight.w500, color: primaryTextColor.withValues(alpha: 0.8)),
+              ),
               Text(
                 '${summary['total_defects'] ?? 0}',
-                style: const TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.w600,
-                  color: AppColors.textDarkGrey,
+                  color: primaryTextColor,
                 ),
               ),
             ],
@@ -475,10 +1201,13 @@ class ResultsPage extends StatelessWidget {
           
           // Defect Types
           if (summary['defect_types'] != null && (summary['defect_types'] as Map).isNotEmpty) ...[
-            const Text('Defect Types:', style: TextStyle(
-              fontWeight: FontWeight.w500,
-              color: AppColors.textDarkGrey,
-            )),
+            Text(
+              'Defect Types:',
+              style: TextStyle(
+                fontWeight: FontWeight.w500,
+                color: primaryTextColor.withValues(alpha: 0.8),
+              ),
+            ),
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
@@ -486,26 +1215,15 @@ class ResultsPage extends StatelessWidget {
               children: (Map<String, dynamic>.from(summary['defect_types'] as Map)).entries
                   .map((entry) => Chip(
                         label: Text('${entry.key}: ${entry.value}'),
-                        backgroundColor: colorScheme.secondary.withOpacity(0.2),
-                        labelStyle: const TextStyle(fontSize: 12),
+                        backgroundColor: colorScheme.secondary.withValues(alpha: isDark ? 0.35 : 0.2),
+                        labelStyle: TextStyle(
+                          fontSize: 12,
+                          color: isDark ? colorScheme.onSecondaryContainer : colorScheme.onSecondary,
+                        ),
                       ))
                   .toList(),
             ),
             const SizedBox(height: 12),
-          ],
-          if (detections.isNotEmpty) ...[
-            const Text('Detected Areas:', style: TextStyle(
-              fontWeight: FontWeight.w500,
-              color: AppColors.textDarkGrey,
-            )),
-            const SizedBox(height: 8),
-            ...List.generate(detections.length, (index) {
-              final raw = detections[index];
-              if (raw is Map<String, dynamic>) {
-                return _defectDetailRow(raw, index);
-              }
-              return _defectDetailRow(Map<String, dynamic>.from(raw as Map), index);
-            }),
           ],
         ],
       ),
@@ -567,6 +1285,34 @@ class ResultsPage extends StatelessWidget {
     return 'severe';
   }
 
+  double? _asDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    if (value is String) {
+      final trimmed = value.trim();
+      if (trimmed.isEmpty) return null;
+      final cleaned = trimmed.replaceAll(RegExp(r'[^0-9\.\-]'), '');
+      if (cleaned.isEmpty) return null;
+      return double.tryParse(cleaned);
+    }
+    return null;
+  }
+
+  int? _asInt(dynamic value) {
+    final double? parsed = _asDouble(value);
+    return parsed?.round();
+  }
+
+  Map<String, dynamic>? _normalizeMonthsRange(Map<String, dynamic>? range, double? _) {
+    if (range != null) {
+      final double? min = _asDouble(range['min']);
+      final double? max = _asDouble(range['max']);
+      if (min != null && max != null && min > 0 && max > 0) {
+        return {'min': min, 'max': max};
+      }
+    }
+    return null;
+  }
+
   String _formatDefectType(String raw) {
     if (raw.isEmpty) return 'Unknown';
     final normalized = raw.replaceAll('_', ' ').replaceAll('-', ' ');
@@ -575,63 +1321,6 @@ class ResultsPage extends StatelessWidget {
         .where((part) => part.isNotEmpty)
         .map((part) => part[0].toUpperCase() + part.substring(1))
         .join(' ');
-  }
-
-  Widget _defectDetailRow(Map<String, dynamic> detection, int index) {
-    final type = _formatDefectType((detection['defect_type'] as String?) ?? 'Unknown');
-    final coords = detection['coordinates'] as Map<String, dynamic>?;
-    final position = coords != null
-        ? '(${(coords['x1'] as num?)?.toInt() ?? 0}, ${(coords['y1'] as num?)?.toInt() ?? 0})'
-        : '';
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
-      decoration: BoxDecoration(
-        color: Colors.grey[100],
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 24,
-            height: 24,
-            decoration: BoxDecoration(
-              color: AppColors.primaryBrown.withOpacity(0.15),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              '${index + 1}',
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-                color: AppColors.primaryBrown,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  type,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textDarkGrey,
-                  ),
-                ),
-                if (position.isNotEmpty)
-                  Text(
-                    'Location: $position',
-                    style: const TextStyle(fontSize: 12, color: AppColors.textGrey),
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   String _formatMonthsText(double estimate, Map<String, dynamic>? range) {
@@ -645,59 +1334,109 @@ class ResultsPage extends StatelessWidget {
   }
 
   String _resolveStatus({String? category, String? severity, num? predictedDays}) {
-    String normalizedSeverity = severity?.toLowerCase() ?? '';
-    if (normalizedSeverity.isEmpty && category != null) {
-      switch (category.toLowerCase()) {
-        case 'excellent':
-          normalizedSeverity = 'mild';
-          break;
-        case 'good':
-        case 'warning':
-          normalizedSeverity = 'moderate';
-          break;
-        case 'critical':
-        case 'expired':
-          normalizedSeverity = 'severe';
-          break;
+    String? normalizedSeverity = _normalizeSeverityTag(severity);
+    final String? rawCategory = category?.trim().isNotEmpty == true ? category!.trim() : null;
+    final String? normalizedCategory = _normalizeSeverityTag(rawCategory);
+
+    if ((normalizedSeverity == null || normalizedSeverity.isEmpty) && predictedDays != null) {
+      final double predicted = predictedDays.toDouble();
+      final double normalizedPct = predicted > 0 ? (predicted / 240.0) * 100.0 : 0;
+      normalizedSeverity = _computeSeverityFromPercentage(normalizedPct);
+    }
+
+    final int severityRank = _severityRank(normalizedSeverity);
+    final int categoryRank = _severityRank(normalizedCategory);
+
+    if (severityRank == 0 && categoryRank == 0) {
+      if (rawCategory != null && rawCategory.isNotEmpty) {
+        return _capitalize(rawCategory.toLowerCase());
       }
+      if (normalizedSeverity != null && normalizedSeverity.isNotEmpty) {
+        return _statusLabelFromSeverity(normalizedSeverity);
+      }
+      return 'Unknown';
     }
 
-    if (normalizedSeverity.isEmpty && predictedDays != null) {
-      normalizedSeverity = _computeSeverityFromPercentage(
-        predictedDays.toDouble() > 0 ? (predictedDays / 240.0) * 100.0 : 0,
-      );
+    if (categoryRank > severityRank && rawCategory != null && rawCategory.isNotEmpty) {
+      return _capitalize(rawCategory.toLowerCase());
     }
 
-    String severityStatus;
+    if (categoryRank == severityRank && categoryRank > 0 && rawCategory != null && rawCategory.isNotEmpty) {
+      return _capitalize(rawCategory.toLowerCase());
+    }
+
+    if (normalizedSeverity != null && normalizedSeverity.isNotEmpty) {
+      return _statusLabelFromSeverity(normalizedSeverity);
+    }
+
+    if (rawCategory != null && rawCategory.isNotEmpty) {
+      return _capitalize(rawCategory.toLowerCase());
+    }
+
+    return 'Unknown';
+  }
+
+  String? _normalizeSeverityTag(String? value) {
+    final String? trimmed = value?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      return null;
+    }
+
+    final String lower = trimmed.toLowerCase();
+    switch (lower) {
+      case 'mild':
+      case 'moderate':
+      case 'severe':
+        return lower;
+      case 'excellent':
+      case 'good':
+      case 'optimal':
+      case 'great':
+      case 'low':
+      case 'best':
+        return 'mild';
+      case 'warning':
+      case 'fair':
+      case 'medium':
+      case 'elevated':
+      case 'moderate risk':
+        return 'moderate';
+      case 'critical':
+      case 'expired':
+      case 'poor':
+      case 'high':
+      case 'extreme':
+      case 'severe risk':
+        return 'severe';
+      default:
+        return null;
+    }
+  }
+
+  int _severityRank(String? normalizedSeverity) {
     switch (normalizedSeverity) {
       case 'mild':
-        severityStatus = 'Excellent';
-        break;
+        return 1;
       case 'moderate':
-        severityStatus = 'Warning';
-        break;
+        return 2;
       case 'severe':
-        severityStatus = 'Critical';
-        break;
+        return 3;
       default:
-        severityStatus = category ?? 'Unknown';
+        return 0;
     }
+  }
 
-    if (category != null) {
-      final normalizedCategory = category.toLowerCase();
-      if ((normalizedSeverity == 'moderate' && normalizedCategory == 'good') ||
-          (normalizedSeverity == 'severe' && normalizedCategory == 'warning')) {
-        severityStatus = _capitalize(normalizedCategory);
-      } else if (normalizedCategory == 'excellent' ||
-          normalizedCategory == 'good' ||
-          normalizedCategory == 'warning' ||
-          normalizedCategory == 'critical' ||
-          normalizedCategory == 'expired') {
-        severityStatus = _capitalize(normalizedCategory);
-      }
+  String _statusLabelFromSeverity(String normalizedSeverity) {
+    switch (normalizedSeverity) {
+      case 'mild':
+        return 'Excellent';
+      case 'moderate':
+        return 'Warning';
+      case 'severe':
+        return 'Critical';
+      default:
+        return _capitalize(normalizedSeverity);
     }
-
-    return severityStatus;
   }
 
   String _capitalize(String value) {
@@ -708,58 +1447,68 @@ class ResultsPage extends StatelessWidget {
 
   
   Widget _buildSeverityAndDefectiveTiles(ColorScheme colorScheme) {
-    // Derive defective% from summary if available; else from (1 - confidence)
-    double defectivePct = 0;
     final summary = _getDefectSummary();
-    print('=== DEFECTIVE PERCENTAGE DEBUG ===');
-    print('Summary data: $summary');
-    print('DefectDetection data: $defectDetection');
-    
-    String? severityLabel;
-    if (summary != null) {
-      print('Summary keys: ${summary.keys}');
-      print('defect_percentage: ${summary['defect_percentage']}');
-      print('total_defects: ${summary['total_defects']}');
-      severityLabel = (summary['severity'] as String?);
-      
-      final num? rawDefectPercentage = summary['defect_percentage'] as num?;
-      if (rawDefectPercentage != null) {
-        defectivePct = rawDefectPercentage.toDouble();
-        print('Defective percentage from summary defect_percentage: $defectivePct');
-      } else if (summary['total_defects'] != null && (summary['total_defects'] as num).toInt() > 0) {
-        final totalDefects = (summary['total_defects'] as num).toInt();
-        final estimatedTotalBeans = 15;
-        defectivePct = (totalDefects / estimatedTotalBeans) * 100.0;
-        print('Defective percentage calculated from total_defects: $totalDefects out of $estimatedTotalBeans = $defectivePct%');
-      } else {
-        defectivePct = 0.0;
-        print('No valid defect data available in summary');
-      }
-    } else {
-      defectivePct = (1.0 - prediction.confidence) * 100.0;
-      print('Defective percentage from confidence: $defectivePct (confidence: ${prediction.confidence})');
+    final List<dynamic> detections = _getDetections();
+    final double? shelfLifePct =
+        _asDouble(shelfLife?['defect_percentage'] ?? shelfLife?['defective_percent']);
+    final int totalDefects =
+        summary?['total_defects'] is num ? (summary!['total_defects'] as num).toInt() : detections.length;
+    final double? summaryPct = _asDouble(summary?['defect_percentage']);
+
+    double? resolvedPctCandidate = shelfLifePct;
+    if (resolvedPctCandidate == null || (resolvedPctCandidate <= 0 && summaryPct != null && summaryPct > 0)) {
+      resolvedPctCandidate = summaryPct;
     }
-    defectivePct = defectivePct.clamp(0.0, 100.0);
-    print('Final defective percentage: $defectivePct');
-    print('=== END DEBUG ===');
+
+    double resolvedPctValue;
+    if (totalDefects > 0) {
+      double? detectionDrivenPct = resolvedPctCandidate;
+      if (detectionDrivenPct == null || detectionDrivenPct <= 0) {
+        detectionDrivenPct = _estimateDefectPercentageFromDetections(detections) ??
+            (totalDefects / math.max(totalDefects, 12)) * 100.0;
+      }
+      resolvedPctValue = math.max(detectionDrivenPct, 28.0);
+    } else {
+      if (resolvedPctCandidate != null) {
+        resolvedPctValue = resolvedPctCandidate;
+      } else {
+        final double lowConfidencePenalty = ((1.0 - prediction.confidence).clamp(0.0, 1.0)) * 40.0;
+        resolvedPctValue = lowConfidencePenalty;
+      }
+    }
+
+    final double defectivePct = resolvedPctValue.clamp(0.0, 100.0);
+
+    final String computedSeverity = _computeSeverityFromPercentage(defectivePct);
+    final String? rawSeverity = summary?['severity'] as String? ?? (shelfLife?['severity'] as String?);
+    final String? normalizedSeverity = _normalizeSeverityTag(rawSeverity);
+    String severityLabel;
+    if (normalizedSeverity == null || normalizedSeverity.isEmpty) {
+      severityLabel = computedSeverity;
+    } else {
+      final int existingRank = _severityRank(normalizedSeverity);
+      final int computedRank = _severityRank(computedSeverity);
+      severityLabel = computedRank > existingRank ? computedSeverity : normalizedSeverity;
+    }
 
     int severityLevel;
-    if (severityLabel != null) {
-      switch (severityLabel.toLowerCase()) {
-        case 'mild':
-          severityLevel = 1;
-          break;
-        case 'moderate':
-          severityLevel = 2;
-          break;
-        case 'severe':
-          severityLevel = 3;
-          break;
-        default:
-          severityLevel = defectivePct < 15 ? 1 : (defectivePct < 35 ? 2 : 3);
-      }
-    } else {
-      severityLevel = defectivePct < 15 ? 1 : (defectivePct < 35 ? 2 : 3);
+    switch (severityLabel.toLowerCase()) {
+      case 'mild':
+        severityLevel = 1;
+        break;
+      case 'moderate':
+        severityLevel = 2;
+        break;
+      case 'severe':
+        severityLevel = 3;
+        break;
+      default:
+        severityLevel = defectivePct < 25 ? 1 : (defectivePct < 45 ? 2 : 3);
+    }
+
+    if (totalDefects > 0 && severityLevel == 1) {
+      severityLevel = 2;
+      severityLabel = 'moderate';
     }
 
     return Row(
@@ -768,7 +1517,6 @@ class ResultsPage extends StatelessWidget {
           child: _severityCard(
             colorScheme,
             severityLevel,
-            qualityGrade: summary?['quality_grade'] as String?,
             severityLabel: severityLabel,
           ),
         ),
@@ -782,11 +1530,12 @@ class ResultsPage extends StatelessWidget {
 
   // ---------- Normalization helpers for history payloads ----------
   Map<String, dynamic>? _getDefectSummary() {
-    if (defectDetection == null) return null;
+    if (defectDetection == null && shelfLife == null) return null;
+
     Map<String, dynamic> summary = {};
-    if (defectDetection!['summary'] is Map<String, dynamic>) {
+    if (defectDetection?['summary'] is Map<String, dynamic>) {
       summary = Map<String, dynamic>.from(defectDetection!['summary'] as Map);
-    } else {
+    } else if (defectDetection != null) {
       final dd = Map<String, dynamic>.from(defectDetection!);
       final String type = (dd['defect_type'] as String?) ?? 'unknown';
       final num percentage = (dd['defect_percentage'] as num?) ?? 0.0;
@@ -799,10 +1548,15 @@ class ResultsPage extends StatelessWidget {
       };
     }
 
+    final Map<String, dynamic>? shelfLifeData =
+        shelfLife != null ? Map<String, dynamic>.from(shelfLife!) : null;
+    final double? shelfLifePct =
+        _asDouble(shelfLifeData?['defect_percentage'] ?? shelfLifeData?['defective_percent']);
+
     final detections = _getDetections();
     if (!summary.containsKey('total_defects') ||
         summary['total_defects'] == null ||
-        (summary['total_defects'] as num).toInt() == 0 && detections.isNotEmpty) {
+        (_asInt(summary['total_defects']) ?? 0) == 0 && detections.isNotEmpty) {
       summary['total_defects'] = detections.length;
     }
 
@@ -811,20 +1565,54 @@ class ResultsPage extends StatelessWidget {
       final rawType = (detection['defect_type'] as String? ?? 'Unknown').toLowerCase();
       typeCounts[rawType] = (typeCounts[rawType] ?? 0) + 1;
     }
+
+    final dynamic shelfLifeCountsRaw = shelfLifeData?['defect_counts'];
+    if (shelfLifeCountsRaw is Map) {
+      final shelfLifeCounts = Map<String, dynamic>.from(shelfLifeCountsRaw);
+      for (final entry in shelfLifeCounts.entries) {
+        final key = entry.key.toString().toLowerCase();
+        final value = entry.value;
+        if (value is num) {
+          final current = typeCounts[key] ?? 0;
+          typeCounts[key] = math.max(current, value.toInt());
+        }
+      }
+    }
     if (typeCounts.isNotEmpty) {
-      summary['defect_types'] = typeCounts.map((key, value) => MapEntry(_formatDefectType(key), value));
+      summary['defect_types'] =
+          typeCounts.map((key, value) => MapEntry(_formatDefectType(key), value));
+      final int countsTotal = typeCounts.values.fold(0, (prev, value) => prev + value);
+      summary['total_defects'] = math.max(_asInt(summary['total_defects']) ?? 0, countsTotal);
     }
 
-    if (!summary.containsKey('severity') || summary['severity'] == null) {
-      final double pct = (summary['defect_percentage'] as num?)?.toDouble() ?? 0.0;
-      summary['severity'] = _computeSeverityFromPercentage(pct);
+    final String? currentQuality = summary['quality_grade'] as String?;
+    if (!summary.containsKey('quality_grade') || currentQuality == null || currentQuality.isEmpty) {
+      final quality = shelfLifeData?['quality_grade'];
+      if (quality is String && quality.isNotEmpty) {
+        summary['quality_grade'] = quality;
+      }
     }
 
-    if (!summary.containsKey('defect_percentage') ||
-        (summary['defect_percentage'] as num?) == null) {
-      final severity = summary['severity'] as String?;
+    double? summaryPct = _asDouble(summary['defect_percentage']);
+    if (summaryPct == null || (summaryPct == 0 && shelfLifePct != null && shelfLifePct > 0)) {
+      summaryPct = shelfLifePct;
+    }
+
+    String? severity = summary['severity'] as String?;
+    if (severity == null || severity.isEmpty) {
+      final dynamic shelfSeverity = shelfLifeData?['severity'] ?? shelfLifeData?['category'];
+      if (shelfSeverity is String && shelfSeverity.isNotEmpty) {
+        severity = shelfSeverity;
+      }
+    }
+
+    double summaryPctValue = summaryPct ?? 0;
+    if (summaryPct == null) {
+      final double pctForSeverity = shelfLifePct ??
+          (_asInt(summary['total_defects']) ?? detections.length) * 8.0;
+      final String severityValue = severity ??= _computeSeverityFromPercentage(pctForSeverity);
       double fallbackPercentage;
-      switch (severity) {
+      switch (severityValue.toLowerCase()) {
         case 'mild':
           fallbackPercentage = 8.0;
           break;
@@ -837,8 +1625,14 @@ class ResultsPage extends StatelessWidget {
         default:
           fallbackPercentage = detections.length * 12.0;
       }
-      summary['defect_percentage'] = fallbackPercentage.clamp(0.0, 100.0);
+      summaryPctValue = fallbackPercentage;
     }
+
+    final double cappedPct = summaryPctValue.clamp(0.0, 100.0);
+    summary['defect_percentage'] = cappedPct;
+    final String normalizedSeverity =
+        _normalizeSeverityTag(severity) ?? _computeSeverityFromPercentage(cappedPct);
+    summary['severity'] = normalizedSeverity;
 
     return summary;
   }
@@ -866,6 +1660,27 @@ class ResultsPage extends StatelessWidget {
     ];
   }
 
+  double? _estimateDefectPercentageFromDetections(List<dynamic> detections) {
+    if (detections.isEmpty) {
+      return null;
+    }
+
+    double totalConfidence = 0;
+    for (final detection in detections) {
+      final double confidence = (detection['confidence'] as num?)?.toDouble() ?? 0.5;
+      totalConfidence += confidence.clamp(0.0, 1.0);
+    }
+
+    final double averageConfidence = totalConfidence / detections.length;
+    final double normalizedConfidence = averageConfidence.clamp(0.3, 0.95);
+    final double countFactor = math.min(1.0, detections.length / 3.0);
+    final double base = 32.0 + (detections.length * 18.0).clamp(0.0, 54.0);
+    final double confidenceAdjustment = (normalizedConfidence - 0.5) * 50.0;
+    final double countAdjustment = countFactor * 35.0;
+    final double estimated = base + confidenceAdjustment + countAdjustment;
+    return estimated.clamp(24.0, 95.0);
+  }
+
   // Derive a readable shelf-life status if backend did not store the category
   String _deriveShelfLifeCategory(Map<String, dynamic> shelf) {
     final int days = (shelf['predicted_days'] as num?)?.toInt() ?? 0;
@@ -885,40 +1700,46 @@ class ResultsPage extends StatelessWidget {
     return 'F';
   }
 
-  Widget _severityCard(ColorScheme colorScheme, int severityLevel, {String? qualityGrade, String? severityLabel}) {
+  Widget _severityCard(ColorScheme colorScheme, int severityLevel, {String? severityLabel}) {
     final computedLabel = severityLabel != null && severityLabel.isNotEmpty
         ? _formatSeverityLabel(severityLabel)
         : (severityLevel == 1 ? 'Mild' : (severityLevel == 2 ? 'Moderate' : 'Severe'));
+    final isDark = colorScheme.brightness == Brightness.dark;
+    final borderColor = isDark ? colorScheme.outline.withValues(alpha: 0.4) : AppColors.dividerGrey;
+    final primaryTextColor = isDark ? colorScheme.onSurface : AppColors.textDarkGrey;
     return Container(
       padding: const EdgeInsets.all(AppConstants.largePadding),
       constraints: const BoxConstraints(minHeight: 220),
       decoration: BoxDecoration(
         color: colorScheme.surface,
         borderRadius: BorderRadius.circular(AppConstants.largeRadius),
-        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
+        border: Border.all(color: borderColor, width: AppConstants.thinBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-         children: [
-           const Text('Severity:', style: TextStyle(fontWeight: FontWeight.w600, color: AppColors.textDarkGrey)),
-           const SizedBox(height: 8),
-          Center(child: BeanSeverityIcon(severityLevel: severityLevel, size: 72, color: AppColors.primaryBrown)),
-          const SizedBox(height: AppConstants.smallSpacing),
-         Center(
-           child: Text(
-             computedLabel,
-              style: const TextStyle(color: AppColors.textDarkGrey, fontWeight: FontWeight.w600),
-           ),
-         ),
-         if (qualityGrade != null) ...[
-           const SizedBox(height: 6),
-           Center(
-             child: Text(
-               'Quality: $qualityGrade',
-               style: const TextStyle(color: AppColors.textGrey, fontSize: 12, fontWeight: FontWeight.w500),
-             ),
-           ),
-         ],
+        children: [
+          Text(
+            'Severity:',
+            style: TextStyle(fontWeight: FontWeight.w600, color: primaryTextColor),
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            height: 140,
+            width: double.infinity,
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  BeanSeverityIcon(severityLevel: severityLevel, size: 72, color: colorScheme.primary),
+                  const SizedBox(height: AppConstants.smallSpacing),
+                  Text(
+                    computedLabel,
+                    style: TextStyle(color: primaryTextColor, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -926,29 +1747,35 @@ class ResultsPage extends StatelessWidget {
 
   Widget _defectivePercentCard(ColorScheme colorScheme, double percent) {
     percent = percent.clamp(0, 100);
+    final isDark = colorScheme.brightness == Brightness.dark;
+    final borderColor = isDark ? colorScheme.outline.withValues(alpha: 0.4) : AppColors.dividerGrey;
+    final primaryTextColor = isDark ? colorScheme.onSurface : AppColors.textDarkGrey;
     return Container(
       padding: const EdgeInsets.all(AppConstants.largePadding),
       constraints: const BoxConstraints(minHeight: 220),
       decoration: BoxDecoration(
         color: colorScheme.surface,
         borderRadius: BorderRadius.circular(AppConstants.largeRadius),
-        border: Border.all(color: AppColors.dividerGrey, width: AppConstants.thinBorder),
+        border: Border.all(color: borderColor, width: AppConstants.thinBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-           const Text('Defective (%)', style: TextStyle(fontWeight: FontWeight.w600, color: AppColors.textDarkGrey)),
+           Text(
+             'Defective (%)',
+             style: TextStyle(fontWeight: FontWeight.w600, color: primaryTextColor),
+           ),
            const SizedBox(height: 16), // Increased spacing
-          Center(child: _circularPercent(colorScheme, percent: percent, color: AppColors.primaryBrown)),
+          Center(child: _circularPercent(colorScheme, percent: percent, color: colorScheme.primary)),
           const SizedBox(height: 16), // Added bottom spacing
         ],
       ),
     );
   }
 
-   Widget _circularPercent(ColorScheme colorScheme, {required double percent, required Color color}) {
-     print('Circular percent widget - percent: $percent, color: $color');
-     return SizedBox(
+  Widget _circularPercent(ColorScheme colorScheme, {required double percent, required Color color}) {
+    _logResultsPage('Circular percent widget - percent: $percent, color: $color');
+    return SizedBox(
        height: 120,
        width: 120,
        child: Stack(
@@ -960,47 +1787,48 @@ class ResultsPage extends StatelessWidget {
              child: CircularProgressIndicator(
                value: (percent / 100.0).clamp(0.0, 1.0),
                strokeWidth: 8,
-               backgroundColor: colorScheme.surfaceVariant,
+               backgroundColor: colorScheme.surfaceContainerHighest,
                valueColor: AlwaysStoppedAnimation<Color>(color),
              ),
            ),
-           Container(
-             width: 72,
-             height: 72,
-             decoration: BoxDecoration(
-               color: colorScheme.surface,
-               borderRadius: BorderRadius.circular(36),
-               boxShadow: [
-                 BoxShadow(
-                   color: Colors.black12,
-                   blurRadius: 4,
-                 ),
-               ],
-             ),
-             alignment: Alignment.center,
-             child: Text(
-               '${percent.toStringAsFixed(0)}%',
-               style: const TextStyle(
-                 fontWeight: FontWeight.w700,
-                 fontSize: 18,
-                 color: AppColors.primaryBrown,
-               ),
-             ),
-           ),
-         ],
-       ),
-     );
-   }
+          Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              color: colorScheme.surface,
+              borderRadius: BorderRadius.circular(36),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black12,
+                  blurRadius: 4,
+                ),
+              ],
+            ),
+            alignment: Alignment.center,
+            child: Text(
+              '${percent.toStringAsFixed(0)}%',
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 18,
+                color: colorScheme.onSurface,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildYesNoButtons(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Row(
       children: [
         Expanded(
           child: ElevatedButton(
             onPressed: () => Navigator.of(context).pop(ResultsNavigationAction.scan),
             style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primaryBrown,
-              foregroundColor: Theme.of(context).colorScheme.onSurface,
+              backgroundColor: colorScheme.primary,
+              foregroundColor: colorScheme.onPrimary,
               padding: const EdgeInsets.symmetric(vertical: AppConstants.mediumSpacing),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
@@ -1014,8 +1842,8 @@ class ResultsPage extends StatelessWidget {
           child: ElevatedButton(
             onPressed: () => Navigator.of(context).pop(ResultsNavigationAction.history),
             style: ElevatedButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.surfaceTint,
-              foregroundColor: AppColors.textDarkGrey,
+              backgroundColor: colorScheme.surfaceContainerHighest,
+              foregroundColor: colorScheme.onSurface,
               padding: const EdgeInsets.symmetric(vertical: AppConstants.mediumSpacing),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
@@ -1037,8 +1865,8 @@ class DefectAnnotationPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    print('Painting defects on canvas size: $size');
-    print('Total detections received: ${detections.length}');
+    _logResultsPage('Painting defects on canvas size: $size');
+    _logResultsPage('Total detections received: ${detections.length}');
     
     final paint = Paint()
       ..color = Colors.red
@@ -1078,13 +1906,13 @@ class DefectAnnotationPainter extends CustomPainter {
     final double scaleX = size.width / (sourceSize.width == 0 ? 1 : sourceSize.width);
     final double scaleY = size.height / (sourceSize.height == 0 ? 1 : sourceSize.height);
     
-    print('Detected source size: $sourceSize -> scaleX=$scaleX, scaleY=$scaleY');
+    _logResultsPage('Detected source size: $sourceSize -> scaleX=$scaleX, scaleY=$scaleY');
 
     for (int i = 0; i < detections.length; i++) {
       final detection = detections[i];
       final coordinates = detection['coordinates'] as Map<String, dynamic>?;
       if (coordinates == null) {
-        print('Detection $i: No coordinates found');
+        _logResultsPage('Detection $i: No coordinates found');
         continue;
       }
 
@@ -1095,11 +1923,11 @@ class DefectAnnotationPainter extends CustomPainter {
       final defectType = detection['defect_type'] as String? ?? 'Unknown';
       final confidence = detection['confidence'] as double? ?? 0.0;
 
-      print('Detection $i: $defectType at ($x1, $y1, $x2, $y2) with confidence $confidence');
+      _logResultsPage('Detection $i: $defectType at ($x1, $y1, $x2, $y2) with confidence $confidence');
 
       // Check if coordinates are valid (not all zeros)
       if ((x1 == 0.0 && y1 == 0.0 && x2 == 0.0 && y2 == 0.0) || x2 <= x1 || y2 <= y1) {
-        print('Detection $i: Invalid coordinates, skipping visual overlay but keeping in counts.');
+        _logResultsPage('Detection $i: Invalid coordinates, skipping visual overlay but keeping in counts.');
         continue;
       }
 
@@ -1119,35 +1947,14 @@ class DefectAnnotationPainter extends CustomPainter {
       final boxWidth = finalX2 - finalX1;
       final boxHeight = finalY2 - finalY1;
       if (boxWidth < 1.5 || boxHeight < 1.5) {
-        print('Detection $i: Bounding box very small after scaling ($boxWidth x $boxHeight), drawing indicator dot instead');
+        _logResultsPage('Detection $i: Bounding box very small after scaling ($boxWidth x $boxHeight), drawing indicator dot instead');
         final dotPaint = Paint()
           ..color = paint.color
           ..style = PaintingStyle.fill;
         final dotCenter = Offset(finalX1.clamp(4.0, size.width - 4.0), finalY1.clamp(4.0, size.height - 4.0));
         canvas.drawCircle(dotCenter, 4, dotPaint);
 
-        // Draw numeric badge near the detection
-        const badgeTextStyle = TextStyle(
-          color: Colors.white,
-          fontSize: 10,
-          fontWeight: FontWeight.w700,
-        );
-        textPainter.text = TextSpan(
-          text: '${i + 1}',
-          style: badgeTextStyle,
-        );
-        textPainter.layout();
-        const badgePadding = 4.0;
-        final badgeWidth = textPainter.width + badgePadding * 2;
-        final badgeHeight = textPainter.height + badgePadding;
-        final badgeLeft = (dotCenter.dx - badgeWidth / 2).clamp(0.0, size.width - badgeWidth);
-        final badgeTop = (dotCenter.dy + 6).clamp(0.0, size.height - badgeHeight);
-        final badgeRect = Rect.fromLTWH(badgeLeft, badgeTop, badgeWidth, badgeHeight);
-        final badgePaint = Paint()
-          ..color = Colors.redAccent.withOpacity(0.95)
-          ..style = PaintingStyle.fill;
-        canvas.drawRRect(RRect.fromRectAndRadius(badgeRect, const Radius.circular(6)), badgePaint);
-        textPainter.paint(canvas, Offset(badgeRect.left + badgePadding, badgeRect.top + badgePadding / 2));
+        // Removed numeric badge near tiny detections to avoid duplication
 
         final labelText = '${i + 1}. $defectType (${(confidence * 100).toInt()}%)';
         textPainter.text = TextSpan(
@@ -1166,7 +1973,7 @@ class DefectAnnotationPainter extends CustomPainter {
           textPainter.height + 4,
         );
         final labelPaint = Paint()
-          ..color = Colors.black.withOpacity(0.7)
+          ..color = Colors.black.withValues(alpha: 0.7)
           ..style = PaintingStyle.fill;
         canvas.drawRect(labelRect, labelPaint);
         textPainter.paint(canvas, Offset(labelRect.left + 4, labelRect.top + 2));
@@ -1175,35 +1982,14 @@ class DefectAnnotationPainter extends CustomPainter {
         continue;
       }
       
-      print('Detection $i: Scaled from ($x1, $y1, $x2, $y2) to ($finalX1, $finalY1, $finalX2, $finalY2)');
+      _logResultsPage('Detection $i: Scaled from ($x1, $y1, $x2, $y2) to ($finalX1, $finalY1, $finalX2, $finalY2)');
 
       // Draw bounding box (outline only) using scaled coordinates
       final rect = Rect.fromLTRB(finalX1, finalY1, finalX2, finalY2);
       canvas.drawRect(rect, paint);
       validBoxesDrawn++;
 
-      // Draw numeric badge anchored to the top-left corner of the bounding box
-      const badgeTextStyle = TextStyle(
-        color: Colors.white,
-        fontSize: 11,
-        fontWeight: FontWeight.w700,
-      );
-      textPainter.text = TextSpan(
-        text: '${i + 1}',
-        style: badgeTextStyle,
-      );
-      textPainter.layout();
-      const badgePadding = 4.0;
-      final badgeWidth = textPainter.width + badgePadding * 2;
-      final badgeHeight = textPainter.height + badgePadding;
-      final badgeLeft = (finalX1 + 2).clamp(0.0, size.width - badgeWidth);
-      final badgeTop = (finalY1 + 2).clamp(0.0, size.height - badgeHeight);
-      final badgeRect = Rect.fromLTWH(badgeLeft, badgeTop, badgeWidth, badgeHeight);
-      final badgePaint = Paint()
-        ..color = Colors.redAccent.withOpacity(0.95)
-        ..style = PaintingStyle.fill;
-      canvas.drawRRect(RRect.fromRectAndRadius(badgeRect, const Radius.circular(6)), badgePaint);
-      textPainter.paint(canvas, Offset(badgeRect.left + badgePadding, badgeRect.top + badgePadding / 2));
+      // Removed numeric badge on boxes to avoid double counting visuals
 
       // Re-layout with descriptive label that mirrors the results list numbering
       final labelText = '${i + 1}. $defectType (${(confidence * 100).toInt()}%)';
@@ -1226,14 +2012,14 @@ class DefectAnnotationPainter extends CustomPainter {
 
       // Draw label background with dark semi-transparent background
       final labelPaint = Paint()
-        ..color = Colors.black.withOpacity(0.6)
+        ..color = Colors.black.withValues(alpha: 0.6)
         ..style = PaintingStyle.fill;
 
       canvas.drawRect(labelRect, labelPaint);
       textPainter.paint(canvas, Offset(finalX1 + 4, labelRect.top + 2));
     }
     
-    print('Valid bounding boxes drawn: $validBoxesDrawn out of ${detections.length} total detections');
+    _logResultsPage('Valid bounding boxes drawn: $validBoxesDrawn out of ${detections.length} total detections');
   }
 
   @override
@@ -1261,3 +2047,5 @@ class DefectAnnotationPainter extends CustomPainter {
     return Size(maxX, maxY);
   }
 }
+
+

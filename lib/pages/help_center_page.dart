@@ -1,17 +1,26 @@
 import 'package:flutter/material.dart';
-import '../utils/app_colors.dart';
 
 class HelpCenterPage extends StatelessWidget {
   const HelpCenterPage({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final background = theme.scaffoldBackgroundColor;
+    final isDark = colorScheme.brightness == Brightness.dark;
     return Scaffold(
-      backgroundColor: AppColors.lightBeige,
+      backgroundColor: background,
       appBar: AppBar(
-        title: const Text('Help Center'),
-        backgroundColor: AppColors.lightBeige,
-        foregroundColor: AppColors.primaryBrown,
+        title: Text(
+          'Help Center',
+          style: theme.textTheme.titleMedium?.copyWith(
+            color: colorScheme.primary,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        backgroundColor: background,
+        foregroundColor: colorScheme.primary,
         elevation: 0,
       ),
       body: LayoutBuilder(
@@ -27,13 +36,15 @@ class HelpCenterPage extends StatelessWidget {
             itemCount: _helpEntries.length + 1,
             itemBuilder: (context, index) {
               if (index == 0) {
-                return const _HeroCard();
+                return _HeroCard(colorScheme: colorScheme, isDark: isDark);
               }
               final entry = _helpEntries[index - 1];
               return _HelpSection(
                 icon: entry.icon,
                 title: entry.title,
                 bulletPoints: entry.bulletPoints,
+                colorScheme: colorScheme,
+                isDark: isDark,
               );
             },
           );
@@ -123,20 +134,29 @@ const List<_HelpEntry> _helpEntries = [
 ];
 
 class _HeroCard extends StatelessWidget {
-  const _HeroCard();
+  final ColorScheme colorScheme;
+  final bool isDark;
+
+  const _HeroCard({required this.colorScheme, required this.isDark});
 
   @override
   Widget build(BuildContext context) {
+    final primary = colorScheme.primary;
+    final subtitleColor = colorScheme.onSurfaceVariant;
+    final shadowColor = isDark
+        ? Colors.black.withValues(alpha: 0.35)
+        : primary.withValues(alpha: 0.12);
+
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: colorScheme.surface,
         borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
-            color: Colors.brown.withOpacity(0.08),
+            color: shadowColor,
             blurRadius: 18,
-            offset: const Offset(0, 6),
+            offset: const Offset(0, 8),
           ),
         ],
       ),
@@ -146,12 +166,12 @@ class _HeroCard extends StatelessWidget {
             width: 64,
             height: 64,
             decoration: BoxDecoration(
-              color: AppColors.primaryBrown.withOpacity(0.1),
+              color: primary.withValues(alpha: isDark ? 0.25 : 0.12),
               borderRadius: BorderRadius.circular(20),
             ),
-            child: const Icon(
+            child: Icon(
               Icons.coffee_outlined,
-              color: AppColors.primaryBrown,
+              color: primary,
               size: 32,
             ),
           ),
@@ -159,20 +179,20 @@ class _HeroCard extends StatelessWidget {
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
+              children: [
                 Text(
                   'Your Bean Coach',
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
-                    color: AppColors.primaryBrown,
+                    color: primary,
                   ),
                 ),
-                SizedBox(height: 6),
+                const SizedBox(height: 6),
                 Text(
                   'Find quick tips, fixes, and contact options to keep scanning smoothly.',
                   style: TextStyle(
-                    color: AppColors.textGrey,
+                    color: subtitleColor,
                     height: 1.35,
                   ),
                 ),
@@ -189,21 +209,29 @@ class _HelpSection extends StatelessWidget {
   final IconData icon;
   final String title;
   final List<String> bulletPoints;
+  final ColorScheme colorScheme;
+  final bool isDark;
 
   const _HelpSection({
     required this.icon,
     required this.title,
     required this.bulletPoints,
+    required this.colorScheme,
+    required this.isDark,
   });
 
   @override
   Widget build(BuildContext context) {
+    final primary = colorScheme.primary;
+    final subtitleColor = colorScheme.onSurfaceVariant;
+    final borderColor = colorScheme.outline.withValues(alpha: isDark ? 0.45 : 0.25);
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: colorScheme.surface,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.dividerGrey.withOpacity(0.5)),
+        border: Border.all(color: borderColor),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -215,12 +243,12 @@ class _HelpSection extends StatelessWidget {
                 width: 36,
                 height: 36,
                 decoration: BoxDecoration(
-                  color: AppColors.primaryBrown.withOpacity(0.12),
+                  color: primary.withValues(alpha: isDark ? 0.25 : 0.12),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Icon(
                   icon,
-                  color: AppColors.primaryBrown,
+                  color: primary,
                   size: 22,
                 ),
               ),
@@ -231,14 +259,14 @@ class _HelpSection extends StatelessWidget {
                   children: [
                     Text(
                       title,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontWeight: FontWeight.w700,
                         fontSize: 17,
-                        color: AppColors.primaryBrown,
+                        color: primary,
                       ),
                     ),
                     const SizedBox(height: 12),
-                    ..._buildBulletList(),
+                    ..._buildBulletList(primary, subtitleColor),
                   ],
                 ),
               ),
@@ -249,7 +277,7 @@ class _HelpSection extends StatelessWidget {
     );
   }
 
-  List<Widget> _buildBulletList() {
+  List<Widget> _buildBulletList(Color primary, Color subtitleColor) {
     return bulletPoints
         .map(
           (point) => Padding(
@@ -257,20 +285,20 @@ class _HelpSection extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Padding(
-                  padding: EdgeInsets.only(top: 4),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
                   child: Icon(
                     Icons.circle,
                     size: 6,
-                    color: AppColors.primaryBrown,
+                    color: primary,
                   ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
                     point,
-                    style: const TextStyle(
-                      color: AppColors.textDarkGrey,
+                    style: TextStyle(
+                      color: subtitleColor,
                       height: 1.5,
                     ),
                   ),

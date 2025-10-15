@@ -3,6 +3,20 @@ import 'dart:io';
 import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'app_logger.dart';
+
+void _logApiService(
+  String message, {
+  Object? error,
+  StackTrace? stackTrace,
+}) {
+  logDebug(
+    'ApiService',
+    message,
+    error: error,
+    stackTrace: stackTrace,
+  );
+}
 
 class BeanPrediction {
   final String prediction;
@@ -190,13 +204,17 @@ class ApiService {
         if (response.statusCode == 200) {
           _resolvedApiUrl = url;
           if (url != apiUrl) {
-            print('API reachable at: $url (selected)');
+            _logApiService('API reachable at: $url (selected)');
           }
           return true;
         }
-      } catch (e) {
+      } catch (e, stackTrace) {
         // Try next candidate
-        print('Health check failed for $url: $e');
+        _logApiService(
+          'Health check failed for $url',
+          error: e,
+          stackTrace: stackTrace,
+        );
       }
     }
     return false;
@@ -212,8 +230,12 @@ class ApiService {
         return BeanPrediction.fromJson(predictionData);
       }
       return null;
-    } catch (e) {
-      print('Prediction failed: $e');
+    } catch (e, stackTrace) {
+      _logApiService(
+        'Prediction failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return null;
     }
   }
@@ -243,7 +265,12 @@ class ApiService {
           'error': 'Failed to get prediction from API',
         };
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      _logApiService(
+        'predictBeanTypeWithErrorHandling failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return {
         'success': false,
         'error': 'Network error: $e',
@@ -294,14 +321,18 @@ class ApiService {
           'data': jsonResponse,
         };
       } else {
-        print('API Error: ${response.statusCode} - ${response.body}');
+        _logApiService('API Error: ${response.statusCode} - ${response.body}');
         return {
           'success': false,
           'error': 'API Error: ${response.statusCode} - ${response.body}',
         };
       }
-    } catch (e) {
-      print('Scan failed: $e');
+    } catch (e, stackTrace) {
+      _logApiService(
+        'Scan failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return {
         'success': false,
         'error': 'Network error: $e',
@@ -334,11 +365,15 @@ class ApiService {
         final jsonResponse = json.decode(response.body);
         return DefectDetection.fromJson(jsonResponse);
       } else {
-        print('API Error: ${response.statusCode} - ${response.body}');
+        _logApiService('API Error: ${response.statusCode} - ${response.body}');
         return null;
       }
-    } catch (e) {
-      print('Defect detection failed: $e');
+    } catch (e, stackTrace) {
+      _logApiService(
+        'Defect detection failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return null;
     }
   }
@@ -368,7 +403,12 @@ class ApiService {
           'error': 'Failed to get defect detection from API',
         };
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      _logApiService(
+        'detectDefectsWithErrorHandling failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return {
         'success': false,
         'error': 'Network error: $e',
@@ -419,14 +459,18 @@ class ApiService {
           'data': jsonResponse,
         };
       } else {
-        print('API Error: ${response.statusCode} - ${response.body}');
+        _logApiService('API Error: ${response.statusCode} - ${response.body}');
         return {
           'success': false,
           'error': 'API Error: ${response.statusCode} - ${response.body}',
         };
       }
-    } catch (e) {
-      print('Test scan failed: $e');
+    } catch (e, stackTrace) {
+      _logApiService(
+        'Test scan failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return {
         'success': false,
         'error': 'Network error: $e',
@@ -440,23 +484,24 @@ class ApiService {
       // Ensure base URL is reachable and resolved
       await checkHealth();
       final deviceId = await _getDeviceId();
-      print('=== HISTORY FETCH DEBUG ===');
-      print('Device ID for history: $deviceId');
+      _logApiService('=== HISTORY FETCH DEBUG ===');
+      _logApiService('Device ID for history: $deviceId');
       final url = Uri.parse('$apiUrl/api/v1/history?device_id=${Uri.encodeComponent(deviceId ?? '')}&limit=$limit&offset=$offset');
-      // Debug: print URL
-      // ignore: avoid_print
-      print('Fetching history: GET ' + url.toString());
-      print('=== END HISTORY DEBUG ===');
+      // Debug: log URL
+      _logApiService('Fetching history: GET $url');
+      _logApiService('=== END HISTORY DEBUG ===');
       final response = await http.get(url).timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         return {'success': true, 'data': json.decode(response.body)};
       }
-      // ignore: avoid_print
-      print('History API Error: ' + response.statusCode.toString() + ' - ' + response.body);
+      _logApiService('History API Error: ${response.statusCode} - ${response.body}');
       return {'success': false, 'error': 'API Error ${response.statusCode}: ${response.body}'};
-    } catch (e) {
-      // ignore: avoid_print
-      print('History fetch failed: ' + e.toString());
+    } catch (e, stackTrace) {
+      _logApiService(
+        'History fetch failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return {'success': false, 'error': 'Network error: $e'};
     }
   }
@@ -465,18 +510,19 @@ class ApiService {
     try {
       await checkHealth();
       final url = Uri.parse('$apiUrl/api/v1/history/$historyId');
-      // ignore: avoid_print
-      print('Fetching history details: GET ' + url.toString());
+      _logApiService('Fetching history details: GET $url');
       final response = await http.get(url).timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         return {'success': true, 'data': json.decode(response.body)};
       }
-      // ignore: avoid_print
-      print('History details API Error: ' + response.statusCode.toString() + ' - ' + response.body);
+      _logApiService('History details API Error: ${response.statusCode} - ${response.body}');
       return {'success': false, 'error': 'API Error ${response.statusCode}: ${response.body}'};
-    } catch (e) {
-      // ignore: avoid_print
-      print('History details fetch failed: ' + e.toString());
+    } catch (e, stackTrace) {
+      _logApiService(
+        'History details fetch failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return {'success': false, 'error': 'Network error: $e'};
     }
   }
@@ -486,7 +532,7 @@ class ApiService {
   static Future<String?> _getDeviceId() async {
     try {
       if (_cachedDeviceId != null) {
-        print('Using cached device ID: $_cachedDeviceId');
+        _logApiService('Using cached device ID: $_cachedDeviceId');
         return _cachedDeviceId;
       }
       // Use a simple on-disk GUID stored in app documents directory
@@ -496,17 +542,21 @@ class ApiService {
         final id = (await file.readAsString()).trim();
         if (id.isNotEmpty) {
           _cachedDeviceId = id;
-          print('Loaded existing device ID: $id');
+          _logApiService('Loaded existing device ID: $id');
           return id;
         }
       }
       final newId = _generateGuid();
       await file.writeAsString(newId, flush: true);
       _cachedDeviceId = newId;
-      print('Generated new device ID: $newId');
+      _logApiService('Generated new device ID: $newId');
       return newId;
-    } catch (e) {
-      print('Error getting device ID: $e');
+    } catch (e, stackTrace) {
+      _logApiService(
+        'Error getting device ID',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return null;
     }
   }
@@ -519,10 +569,14 @@ class ApiService {
       final newId = _generateGuid();
       await file.writeAsString(newId, flush: true);
       _cachedDeviceId = newId;
-      print('Force regenerated device ID: $newId');
+      _logApiService('Force regenerated device ID: $newId');
       return newId;
-    } catch (e) {
-      print('Error regenerating device ID: $e');
+    } catch (e, stackTrace) {
+      _logApiService(
+        'Error regenerating device ID',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return null;
     }
   }
@@ -531,16 +585,16 @@ class ApiService {
   static Future<Map<String, dynamic>> testBackendConnection() async {
     try {
       final deviceId = await _getDeviceId();
-      print('=== BACKEND CONNECTION TEST ===');
-      print('Device ID: $deviceId');
+      _logApiService('=== BACKEND CONNECTION TEST ===');
+      _logApiService('Device ID: $deviceId');
       
       // Test health endpoint
       final healthResult = await checkHealth();
-      print('Health check: $healthResult');
+      _logApiService('Health check: $healthResult');
       
       // Test history endpoint
       final historyResult = await fetchHistory(limit: 5);
-      print('History test result: $historyResult');
+      _logApiService('History test result: $historyResult');
       
       return {
         'success': true,
@@ -548,8 +602,12 @@ class ApiService {
         'health_check': healthResult,
         'history_test': historyResult
       };
-    } catch (e) {
-      print('Backend connection test failed: $e');
+    } catch (e, stackTrace) {
+      _logApiService(
+        'Backend connection test failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       return {
         'success': false,
         'error': e.toString()

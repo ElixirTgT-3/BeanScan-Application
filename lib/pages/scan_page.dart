@@ -3,11 +3,28 @@ import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 import '../utils/app_colors.dart';
 import '../utils/app_constants.dart';
 import '../utils/api_service.dart';
+import '../utils/local_history_store.dart';
+import '../utils/app_settings.dart';
+import '../utils/app_logger.dart';
 import 'results_page.dart';
+
+void _logScanPage(
+  String message, {
+  Object? error,
+  StackTrace? stackTrace,
+}) {
+  logDebug(
+    'ScanPage',
+    message,
+    error: error,
+    stackTrace: stackTrace,
+  );
+}
 
 class ScanPage extends StatefulWidget {
   final VoidCallback? onClose;
@@ -253,7 +270,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       }
 
       // Process the image with API
-      await _processImage(file);
+      await _processImage(file, fromGallery: false);
       
     } catch (e) {
       debugPrint('Error taking picture: $e');
@@ -320,7 +337,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _processImage(File imageFile) async {
+  Future<void> _processImage(File imageFile, {required bool fromGallery}) async {
     try {
       // Show loading dialog
       showDialog(
@@ -364,57 +381,155 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
       if (testResult['success'] && testResult['data'] != null) {
         // Debug: Print the full API response
-        print('🔍 API Response Debug:');
-        print('  - testResult: $testResult');
-        print('  - data: ${testResult['data']}');
-        
-        // Convert the prediction data to BeanPrediction object
-        final predictionData = testResult['data']['data']['prediction'];
-        print('  - predictionData: $predictionData');
-
-        // Validate that the image looks like coffee beans
-        final predictedClass = (predictionData['predicted_class'] ?? '').toString();
-        final double predictedConfidence = (predictionData['confidence'] ?? 0.0).toDouble();
-        const knownBeans = ['Arabica', 'Robusta', 'Liberica', 'Excelsa'];
-        final bool isKnownBean = knownBeans.contains(predictedClass);
-        // Tighten acceptance; also use simple color heuristic (brown ratio)
-        final double brownRatio = await _estimateBrownRatio(imageFile);
-        final bool confidentEnough = predictedConfidence >= 0.75;
-        if (!(isKnownBean && confidentEnough) && brownRatio < 0.05) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Please upload a clear image of coffee beans.'),
-                backgroundColor: Colors.orange,
-                duration: Duration(seconds: 3),
-              ),
-            );
-          }
-          return;
-        }
-        
-        // Convert all_probabilities from list to map
-        final probabilitiesList = predictionData['all_probabilities'] as List<dynamic>? ?? [];
-        final beanTypes = ['Arabica', 'Robusta', 'Liberica', 'Excelsa'];
-        final allProbabilities = <String, double>{};
-        
-        for (int i = 0; i < probabilitiesList.length && i < beanTypes.length; i++) {
-          allProbabilities[beanTypes[i]] = (probabilitiesList[i] as num).toDouble();
-        }
+        _logScanPage('API Response Debug:');
+        _logScanPage('  - testResult: $testResult');
+        _logScanPage('  - data: ${testResult['data']}');
         
         final healthScoreData = testResult['data']['data']['health_score'];
         final double healthScorePercentage = (healthScoreData?['percentage'] as num?)?.toDouble() ?? 0.0;
         final double derivedConfidence = ((healthScorePercentage / 100).clamp(0.0, 1.0)).toDouble();
 
+        // Convert the prediction data to BeanPrediction object
+        final predictionData = testResult['data']['data']['prediction'];
+        _logScanPage('  - predictionData: $predictionData');
+
+        // Validate that the image looks like coffee beans
+        String predictedClass = (predictionData['predicted_class'] ?? '').toString();
+        double predictedConfidence = (predictionData['confidence'] ?? 0.0).toDouble();
+        const List<String> beanTypes = ['Arabica', 'Robusta', 'Liberica', 'Excelsa'];
+        final List<dynamic> probabilitiesRaw =
+            predictionData['all_probabilities'] as List<dynamic>? ?? const <dynamic>[];
+        final List<double> probabilityValues = [
+          for (int i = 0; i < probabilitiesRaw.length && i < beanTypes.length; i++)
+            (probabilitiesRaw[i] as num).toDouble(),
+        ];
+
+        final _ImageHeuristics heuristics = await _analyzeImageHeuristics(imageFile);
+        final double brownRatio = heuristics.brownRatio;
+        final double textureScore = heuristics.textureScore;
+        final double contrastScore = heuristics.contrast;
+        final double visualScore = _computeVisualBeanScore(
+          brownRatio: brownRatio,
+          textureScore: textureScore,
+          contrastScore: contrastScore,
+        );
+
+        bool isKnownBean = beanTypes.contains(predictedClass);
+        if (!isKnownBean && probabilityValues.isNotEmpty) {
+          final int topIndex = _indexOfMax(probabilityValues);
+          if (topIndex != -1) {
+            final double topProbability = probabilityValues[topIndex];
+            final bool heuristicsSupport = visualScore >= 0.3;
+            if (topProbability >= 0.28 && heuristicsSupport && topIndex < beanTypes.length) {
+              predictedClass = beanTypes[topIndex];
+              predictedConfidence = topProbability;
+              isKnownBean = true;
+              _logScanPage(
+                'Applied fallback bean label: $predictedClass (prob=${(topProbability * 100).toStringAsFixed(1)}%)',
+              );
+            }
+          }
+        }
+
+        final double bestConfidence =
+            predictedConfidence > derivedConfidence ? predictedConfidence : derivedConfidence;
+        final double normalizedConfidence = math.min(1.0, math.max(0.0, bestConfidence));
+        const double minConfidenceThreshold = 0.45;
+        const double minBrownRatioThreshold = 0.012;
+        const double criticalBrownThreshold = 0.005;
+        const double minTextureThreshold = 0.045;
+        const double minContrastThreshold = 7.0;
+        final bool heuristicsVeryWeak = visualScore < 0.12;
+        final bool heuristicsStrong = visualScore >= 0.38;
+
+        final List<String> rejectionReasons = [];
+        final bool failClass = !isKnownBean && !heuristicsStrong;
+        final bool failConfidence = normalizedConfidence < minConfidenceThreshold && !heuristicsStrong;
+        final bool failColor = brownRatio < minBrownRatioThreshold && !heuristicsStrong && normalizedConfidence < 0.6;
+        final bool failColorCritical = brownRatio < criticalBrownThreshold && !heuristicsStrong;
+        final bool failTexture = textureScore < minTextureThreshold && !heuristicsStrong && normalizedConfidence < 0.55;
+        final bool failContrast = contrastScore < minContrastThreshold && !heuristicsStrong && normalizedConfidence < 0.55;
+        final bool failVisualScore = heuristicsVeryWeak && normalizedConfidence < 0.5;
+
+        if (failClass) {
+          final displayClass = predictedClass.isEmpty ? 'another object' : predictedClass;
+          rejectionReasons.add(
+            'The AI labeled this photo as "$displayClass", which is not a supported coffee bean type.',
+          );
+        }
+        if (failConfidence) {
+          rejectionReasons.add(
+            'The AI is only ${(normalizedConfidence * 100).clamp(0, 100).toStringAsFixed(0)}% sure the image shows coffee beans.',
+          );
+        }
+        if (failColor) {
+          rejectionReasons.add(
+            'Only ${(brownRatio * 100).clamp(0, 100).toStringAsFixed(1)}% of the pixels match typical coffee bean colors.',
+          );
+        }
+        if (failTexture) {
+          rejectionReasons.add(
+            'The photo looks very smooth (texture score ${(textureScore * 100).toStringAsFixed(0)}), while coffee beans have more surface detail.',
+          );
+        }
+        if (failContrast) {
+          rejectionReasons.add(
+            'Lighting/contrast is very low (contrast score ${contrastScore.toStringAsFixed(1)}); beans need sharper highlights and shadows.',
+          );
+        }
+
+        if (failVisualScore) {
+          rejectionReasons.add(
+            'The photo lacks the bean-like colors and surface texture we expect (visual score ${(visualScore * 100).clamp(0, 100).toStringAsFixed(0)}%).',
+          );
+        }
+
+        final int softFailCount = [
+          failConfidence,
+          failColor,
+          failTexture,
+          failContrast,
+          failVisualScore,
+        ].where((v) => v).length;
+
+        final bool shouldReject = failClass ||
+            failColorCritical ||
+            failVisualScore ||
+            (failColor && (failConfidence || failTexture || failContrast)) ||
+            softFailCount >= 3;
+
+        _logScanPage(
+          'Heuristic check -> class=$predictedClass, confidence=${(normalizedConfidence * 100).toStringAsFixed(1)}%, '
+          'brownRatio=${(brownRatio * 100).toStringAsFixed(2)}%, texture=${(textureScore * 100).toStringAsFixed(1)}%, '
+          'contrast=${contrastScore.toStringAsFixed(1)}, visual=${(visualScore * 100).toStringAsFixed(0)}%, reject=$shouldReject',
+        );
+
+        if (shouldReject) {
+          if (rejectionReasons.isEmpty) {
+            rejectionReasons.add(
+              'We could not verify enough visual cues that the image contains coffee beans.',
+            );
+          }
+          await _showNonCoffeeDialog(
+            fromGallery: fromGallery,
+            reasons: rejectionReasons,
+          );
+          return;
+        }
+        
+        final allProbabilities = <String, double>{};
+
+        for (int i = 0; i < probabilityValues.length && i < beanTypes.length; i++) {
+          allProbabilities[beanTypes[i]] = probabilityValues[i];
+        }
+
         final beanPrediction = BeanPrediction(
-          prediction: predictionData['predicted_class'] ?? '',
-          confidence: derivedConfidence > 0
-              ? derivedConfidence
-              : (predictionData['confidence'] ?? testResult['data']['data']['shelf_life']?['confidence_score'] ?? 0.0).toDouble(),
+          prediction: predictedClass,
+          confidence: normalizedConfidence,
           allProbabilities: allProbabilities,
         );
         
-        print('  - beanPrediction: $beanPrediction');
+        _logScanPage('  - beanPrediction: $beanPrediction');
         
         // Use the image URL directly from the scan response
         String imagePathToShow = imageFile.path; // Fallback to local file
@@ -422,18 +537,43 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           final imageUrl = testResult['data']['image_url'];
           if (imageUrl is String && imageUrl.isNotEmpty) {
             imagePathToShow = imageUrl;
-            print('Using backend image URL: $imagePathToShow');
+            _logScanPage('Using backend image URL: $imagePathToShow');
           } else {
-            print('No image URL in response, using local file: $imagePathToShow');
+            _logScanPage('No image URL in response, using local file: $imagePathToShow');
           }
-        } catch (e) {
-          print('Could not get image URL from response: $e');
+        } catch (e, stackTrace) {
+          _logScanPage(
+            'Could not get image URL from response',
+            error: e,
+            stackTrace: stackTrace,
+          );
+        }
+
+        final double cachedHealthyPercent = healthScorePercentage.clamp(0.0, 100.0);
+        final double cachedDefectivePercent = (100.0 - cachedHealthyPercent).clamp(0.0, 100.0);
+        try {
+          final localEntry = CachedHistoryEntry.fromScanResponse(
+            response: testResult['data'] as Map<String, dynamic>,
+            prediction: beanPrediction,
+            healthyPercent: cachedHealthyPercent,
+            defectivePercent: cachedDefectivePercent,
+            imagePath: imagePathToShow,
+            defectDetection: testResult['data']['data']['defect_detection'] as Map<String, dynamic>?,
+            shelfLife: testResult['data']['data']['shelf_life'] as Map<String, dynamic>?,
+          );
+          await LocalHistoryStore.addEntry(localEntry);
+        } catch (cacheErr, stackTrace) {
+          _logScanPage(
+            'Failed to cache history entry',
+            error: cacheErr,
+            stackTrace: stackTrace,
+          );
         }
 
         // Navigate to results page with both classification and defect detection
-        print('🚀 About to navigate to ResultsPage...');
+        _logScanPage('About to navigate to ResultsPage...');
         if (mounted) {
-          print('🚀 Navigating to ResultsPage...');
+          _logScanPage('Navigating to ResultsPage...');
           final result = await Navigator.of(context).push<ResultsNavigationAction?>(
             MaterialPageRoute(
               builder: (context) => ResultsPage(
@@ -441,10 +581,11 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                 defectDetection: testResult['data']['data']['defect_detection'],
                 shelfLife: testResult['data']['data']['shelf_life'],
                 imagePath: imagePathToShow,
+                shouldAutoSave: AppSettings.instance.autoSaveScans,
               ),
             ),
           );
-          print('🚀 Navigation completed with result: $result');
+          _logScanPage('Navigation completed with result: $result');
           if (!mounted) {
             return;
           }
@@ -456,7 +597,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
             }
           }
         } else {
-          print('❌ Widget not mounted, cannot navigate');
+          _logScanPage('Widget not mounted, cannot navigate');
         }
       } else {
         // Show error message
@@ -469,7 +610,12 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           );
         }
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      _logScanPage(
+        'Failed to process image',
+        error: e,
+        stackTrace: stackTrace,
+      );
       // Hide loading dialog
       if (mounted) {
         Navigator.of(context).pop();
@@ -516,7 +662,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         }
         
         // Process the image with API
-        await _processImage(file);
+        await _processImage(file, fromGallery: true);
       }
     } catch (e) {
       debugPrint('Error picking image: $e');
@@ -563,6 +709,65 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         );
       }
     }
+  }
+
+  Future<void> _showNonCoffeeDialog({
+    required bool fromGallery,
+    required List<String> reasons,
+  }) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        final uploadLabel = fromGallery ? 'Upload Different Image' : 'Upload Another Image';
+        return AlertDialog(
+          title: const Text('Try Again'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                "We couldn't confirm that this photo contains coffee beans.",
+              ),
+              if (reasons.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                ...reasons.map(
+                  (reason) => Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('- '),
+                        Expanded(child: Text(reason)),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              const Text(
+                'Try again with beans filling most of the frame, good lighting, and minimal background.',
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Retake Photo'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(ctx).pop();
+                if (mounted) {
+                  Future.microtask(_pickImageFromGallery);
+                }
+              },
+              child: Text(uploadLabel),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   // Quick luminance check to reject completely dark/blank images
@@ -618,37 +823,126 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         total++;
       }
       final ratio = brownish / total;
-      return ratio > 0.02; // minimal precheck; final gate uses _estimateBrownRatio
+      return ratio > 0.02; // minimal precheck; final gate uses _analyzeImageHeuristics
     } catch (_) {
       return true;
     }
   }
 
-  Future<double> _estimateBrownRatio(File file) async {
+  Future<_ImageHeuristics> _analyzeImageHeuristics(File file) async {
     try {
       final bytes = await file.readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes, targetWidth: 96, targetHeight: 96);
       final frame = await codec.getNextFrame();
       final image = frame.image;
+      final width = image.width;
+      final height = image.height;
       final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-      if (byteData == null) return 0.0;
+      image.dispose();
+      if (byteData == null || width == 0 || height == 0) {
+        return const _ImageHeuristics();
+      }
       final data = byteData.buffer.asUint8List();
 
       int brownish = 0;
       int total = 0;
+      double brightnessSum = 0.0;
+      double brightnessSqSum = 0.0;
+      double textureAccumulator = 0.0;
+      int neighborSamples = 0;
+
+      double computeBrightness(double r, double g, double b) =>
+          (0.2126 * r + 0.7152 * g + 0.0722 * b);
+
       for (int i = 0; i < data.length; i += 4) {
         final r = data[i].toDouble();
         final g = data[i + 1].toDouble();
         final b = data[i + 2].toDouble();
-        final brightness = (0.2126 * r + 0.7152 * g + 0.0722 * b);
+        final brightness = computeBrightness(r, g, b);
         final isBrown = r > 70 && g > 50 && b < 110 && r >= g && brightness > 35 && brightness < 200;
         if (isBrown) brownish++;
         total++;
+        brightnessSum += brightness;
+        brightnessSqSum += brightness * brightness;
+
+        final int pixelIndex = i ~/ 4;
+        final int x = pixelIndex % width;
+        final int y = pixelIndex ~/ width;
+
+        if (x < width - 1) {
+          final neighborIdx = i + 4;
+          final nr = data[neighborIdx].toDouble();
+          final ng = data[neighborIdx + 1].toDouble();
+          final nb = data[neighborIdx + 2].toDouble();
+          final neighborBrightness = computeBrightness(nr, ng, nb);
+          textureAccumulator += (brightness - neighborBrightness).abs() / 255.0;
+          neighborSamples++;
+        }
+        if (y < height - 1) {
+          final neighborIdx = i + (width * 4);
+          if (neighborIdx < data.length) {
+            final nr = data[neighborIdx].toDouble();
+            final ng = data[neighborIdx + 1].toDouble();
+            final nb = data[neighborIdx + 2].toDouble();
+            final neighborBrightness = computeBrightness(nr, ng, nb);
+            textureAccumulator += (brightness - neighborBrightness).abs() / 255.0;
+            neighborSamples++;
+          }
+        }
       }
-      return total == 0 ? 0.0 : brownish / total;
+
+      if (total == 0) {
+        return const _ImageHeuristics();
+      }
+
+      final double brownRatio = brownish / total;
+      final double meanBrightness = brightnessSum / total;
+      final double variance = (brightnessSqSum / total) - (meanBrightness * meanBrightness);
+      final double contrast = variance <= 0 ? 0.0 : math.sqrt(variance);
+      final double textureScore =
+          neighborSamples == 0 ? 0.0 : textureAccumulator / neighborSamples;
+
+      return _ImageHeuristics(
+        brownRatio: brownRatio.clamp(0.0, 1.0).toDouble(),
+        textureScore: textureScore.clamp(0.0, 1.0).toDouble(),
+        contrast: contrast,
+      );
     } catch (_) {
-      return 0.0;
+      return const _ImageHeuristics();
     }
+  }
+
+  double _computeVisualBeanScore({
+    required double brownRatio,
+    required double textureScore,
+    required double contrastScore,
+  }) {
+    double normalize(double value, double maxValue) {
+      if (maxValue <= 0) return 0.0;
+      return math.min(1.0, math.max(0.0, value / maxValue));
+    }
+
+    final double brownComponent = normalize(brownRatio, 0.12); // ~12% brown pixels for solid beans
+    final double textureComponent = normalize(textureScore, 0.16); // texture differences across neighbors
+    final double contrastComponent = normalize(contrastScore, 18.0); // contrast across lighting
+
+    return brownComponent * 0.5 + textureComponent * 0.3 + contrastComponent * 0.2;
+  }
+
+  int _indexOfMax(List<double> values) {
+    if (values.isEmpty) {
+      return -1;
+    }
+    int bestIndex = 0;
+    double bestValue = values[0];
+    for (int i = 1; i < values.length; i++) {
+      final double value = values[i];
+      if (value > bestValue) {
+        bestValue = value;
+        bestIndex = i;
+      }
+    }
+    return bestIndex;
   }
 
   @override
@@ -979,7 +1273,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
             borderRadius: BorderRadius.circular(12),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.1),
+                color: Colors.black.withValues(alpha: 0.1),
                 blurRadius: 8,
                 offset: const Offset(0, 2),
               ),
@@ -1045,14 +1339,14 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
               height: 70,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: Colors.white.withOpacity(0.2),
+                color: Colors.white.withValues(alpha: 0.2),
                 border: Border.all(
                   color: Colors.white,
                   width: 3,
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.3),
+                    color: Colors.black.withValues(alpha: 0.3),
                     blurRadius: 10,
                     offset: const Offset(0, 4),
                   ),
@@ -1087,4 +1381,16 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       ),
     );
   }
-} 
+}
+
+class _ImageHeuristics {
+  final double brownRatio;
+  final double textureScore;
+  final double contrast;
+
+  const _ImageHeuristics({
+    this.brownRatio = 0.0,
+    this.textureScore = 0.0,
+    this.contrast = 0.0,
+  });
+}

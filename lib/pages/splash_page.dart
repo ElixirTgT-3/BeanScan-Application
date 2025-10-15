@@ -1,6 +1,4 @@
 import 'package:flutter/material.dart';
-import '../utils/app_colors.dart';
-import '../utils/app_constants.dart';
 import '../main.dart';
 
 class SplashPage extends StatefulWidget {
@@ -24,40 +22,23 @@ class _SplashPageState extends State<SplashPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final bool isDark = theme.brightness == Brightness.dark;
+    final String backgroundImage = isDark
+        ? 'https://storage.googleapis.com/tagjs-prod.appspot.com/v1/ovGha4FhsH/y9nv6az7_expires_30_days.png'
+        : 'https://storage.googleapis.com/tagjs-prod.appspot.com/v1/ovGha4FhsH/4f9rxn80_expires_30_days.png';
+
     return Scaffold(
       backgroundColor: Colors.white,
       body: SafeArea(
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                width: 120,
-                height: 120,
-                decoration: BoxDecoration(
-                  color: AppColors.lightBeige,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: AppColors.primaryBrown, width: AppConstants.mediumBorder),
-                ),
-                child: const Center(
-                  child: Icon(
-                    Icons.search,
-                    size: 56,
-                    color: AppColors.primaryBrown,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              const Text(
-                'BEANSCAN',
-                style: TextStyle(
-                  color: AppColors.primaryBrown,
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 2,
-                ),
-              ),
-            ],
+        child: Container(
+          width: double.infinity,
+          height: double.infinity,
+          decoration: BoxDecoration(
+            image: DecorationImage(
+              image: NetworkImage(backgroundImage),
+              fit: BoxFit.cover,
+            ),
           ),
         ),
       ),
