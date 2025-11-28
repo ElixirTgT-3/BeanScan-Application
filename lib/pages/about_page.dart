@@ -1,7 +1,52 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
-class AboutPage extends StatelessWidget {
+import '../utils/demo_override.dart';
+
+class AboutPage extends StatefulWidget {
   const AboutPage({super.key});
+
+  @override
+  State<AboutPage> createState() => _AboutPageState();
+}
+
+class _AboutPageState extends State<AboutPage> {
+  final DemoOverride _demo = DemoOverride();
+  int _tapCount = 0;
+  DateTime? _lastTap;
+
+  void _handleSecretTap() {
+    final now = DateTime.now();
+    if (_lastTap != null && now.difference(_lastTap!) < const Duration(milliseconds: 700)) {
+      _tapCount++;
+    } else {
+      _tapCount = 1;
+    }
+    _lastTap = now;
+
+    if (_tapCount >= 3) {
+      final bool wasEnabled = _demo.isEnabled;
+      _demo.toggle();
+      if (!wasEnabled && _demo.isEnabled) {
+        _demo.setOverride('Excelsa'); // Default to square/Excelsa when turning on
+      }
+      _tapCount = 0;
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              _demo.isEnabled
+                  ? 'Demo override enabled. Tap the camera view to cycle bean shapes.'
+                  : 'Demo override disabled.',
+            ),
+            backgroundColor: _demo.isEnabled ? Colors.green : Colors.grey,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+      setState(() {});
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -25,46 +70,50 @@ class AboutPage extends StatelessWidget {
         foregroundColor: colorScheme.primary,
         elevation: 0,
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          _HeroHeader(
-            currentYear: currentYear,
-            colorScheme: colorScheme,
-            isDark: isDark,
-          ),
-          const SizedBox(height: 24),
-          _InfoTile(
-            icon: Icons.assistant_photo_outlined,
-            title: 'Mission',
-            body:
-                'BeanScan helps coffee professionals classify bean varieties, flag defects, and estimate shelf life in seconds using a mobile device.',
-            colorScheme: colorScheme,
-            isDark: isDark,
-          ),
-          const SizedBox(height: 16),
-          _InfoTile(
-            icon: Icons.emoji_objects_outlined,
-            title: 'Tech Stack',
-            body:
-                '- Flutter mobile app with adaptive UI.\n'
-                '- PyTorch models for classification and detection.\n'
-                '- FastAPI backend paired with Supabase history storage.',
-            colorScheme: colorScheme,
-            isDark: isDark,
-          ),
-          const SizedBox(height: 16),
-          _InfoTile(
-            icon: Icons.people_outline,
-            title: 'Community',
-            body:
-                'Thousands of roasters and graders rely on BeanScan to keep shipments consistent and reduce manual inspection time.',
-            colorScheme: colorScheme,
-            isDark: isDark,
-          ),
-          const SizedBox(height: 24),
-          _ContactCard(colorScheme: colorScheme),
-        ],
+      body: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: _handleSecretTap,
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            _HeroHeader(
+              currentYear: currentYear,
+              colorScheme: colorScheme,
+              isDark: isDark,
+            ),
+            const SizedBox(height: 24),
+            _InfoTile(
+              icon: Icons.assistant_photo_outlined,
+              title: 'Mission',
+              body:
+                  'BeanScan helps coffee professionals classify bean varieties, flag defects, and estimate shelf life in seconds using a mobile device.',
+              colorScheme: colorScheme,
+              isDark: isDark,
+            ),
+            const SizedBox(height: 16),
+            _InfoTile(
+              icon: Icons.emoji_objects_outlined,
+              title: 'Tech Stack',
+              body:
+                  '- Flutter mobile app with adaptive UI.\n'
+                  '- PyTorch models for classification and detection.\n'
+                  '- FastAPI backend paired with Supabase history storage.',
+              colorScheme: colorScheme,
+              isDark: isDark,
+            ),
+            const SizedBox(height: 16),
+            _InfoTile(
+              icon: Icons.people_outline,
+              title: 'Community',
+              body:
+                  'Thousands of coffee roasters, graders, and enthusiasts rely on manual sorting which beanscan can help to maintain consistency in bean quality assessment. The app helps reduce manual inspection time and ensures accurate evaluations across the supply chain.',
+              colorScheme: colorScheme,
+              isDark: isDark,
+            ),
+            const SizedBox(height: 24),
+            _ContactCard(colorScheme: colorScheme),
+          ],
+        ),
       ),
     );
   }

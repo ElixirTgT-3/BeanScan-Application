@@ -1,16 +1,42 @@
+import json
+import os
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional
+
 import torch
+import torch.nn.functional as F
 import torchvision.transforms as transforms
 from PIL import Image
-import numpy as np
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
-import logging
 
 from .custom_models import DefectDetectorFasterRCNN
+from .defect_classifier_mobilenet import CoffeeNetCNN, build_inference_transform
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def _load_class_names(label_path: Path, fallback: List[str]) -> List[str]:
+    """
+    Load class names from a JSON file. Accepts either a list or a dict mapping.
+    Falls back to provided list on error.
+    """
+    try:
+        if label_path.exists():
+            with open(label_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [str(x) for x in data]
+            if isinstance(data, dict):
+                # Accept {"0": "cls", ...} or {"classes": [...]}
+                if "classes" in data and isinstance(data["classes"], list):
+                    return [str(x) for x in data["classes"]]
+                # Assume mapping of idx->name
+                return [v for k, v in sorted(data.items(), key=lambda kv: int(kv[0]))]
+    except Exception as exc:  # pylint: disable=broad-except
+        logging.getLogger(__name__).warning("Failed to load class names: %s", exc)
+    return fallback
+
 
 class DefectDetectionService:
     """Service for detecting coffee bean defects using trained Faster R-CNN model"""
@@ -226,6 +252,166 @@ class DefectDetectionService:
         else:
             return 'F'
 
-def create_defect_detector(model_path: str = "models/best_model.pth", device: str = "cpu") -> DefectDetectionService:
-    """Create and return a defect detection service instance"""
+class DefectClassificationService:
+    """
+    Lightweight defect classifier using MobileNetV3 Small (final stable version).
+    Uses classification instead of bounding boxes for defect identification.
+    """
+
+    def __init__(self, model_path: str, class_names: List[str], device: str = "cpu"):
+        self.device = torch.device(device)
+        self.model_path = model_path
+        self.class_names = class_names
+        self.transform = build_inference_transform()
+        self.model = CoffeeNetCNN(num_classes=len(class_names), pretrained=False).to(self.device)
+        self._load_model()
+
+    def _load_model(self):
+        try:
+            state_dict = torch.load(self.model_path, map_location=self.device)
+            self.model.load_state_dict(state_dict)
+            self.model.eval()
+            logging.getLogger(__name__).info("Loaded defect classifier from %s", self.model_path)
+        except Exception as exc:  # pylint: disable=broad-except
+            logging.getLogger(__name__).error("Failed to load defect classifier: %s", exc)
+            self.model = None
+
+    def detect_defects(self, image_path: str, confidence_threshold: float = 0.5) -> Dict:
+        if self.model is None:
+            return {
+                "success": False,
+                "error": "Defect classifier not available",
+                "detections": [],
+                "summary": {
+                    "total_defects": 0,
+                    "defect_types": {},
+                    "defect_percentage": 0,
+                    "quality_score": 1.0,
+                    "quality_grade": "Unknown",
+                },
+            }
+
+        try:
+            image = Image.open(image_path).convert("RGB")
+            tensor = self.transform(image).unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                logits = self.model(tensor)
+                probs = F.softmax(logits, dim=1)
+                confidence, pred_idx = probs.max(dim=1)
+
+            confidence = confidence.item()
+            pred_idx = pred_idx.item()
+            predicted_class = self.class_names[pred_idx] if pred_idx < len(self.class_names) else f"class_{pred_idx}"
+
+            is_clean = predicted_class.lower() in {
+                "healthy",
+                "no_defect",
+                "background",
+                "none",
+                "clean",
+            }
+
+            detections = []
+            if not is_clean and confidence >= confidence_threshold:
+                detections.append(
+                    {
+                        "bbox": None,
+                        "confidence": float(confidence),
+                        "defect_type": predicted_class,
+                        "coordinates": None,
+                        "area": 0.0,
+                        "center": None,
+                    }
+                )
+
+            total_defects = len(detections)
+            defect_types = {predicted_class: 1} if total_defects > 0 else {}
+            defect_percentage = 0 if is_clean else round(confidence * 100, 2)
+            quality_score = 1.0 if is_clean else max(0.0, 1.0 - (defect_percentage / 100) * 0.6)
+
+            return {
+                "success": True,
+                "detections": detections,
+                "summary": {
+                    "total_defects": total_defects,
+                    "defect_types": defect_types,
+                    "defect_percentage": defect_percentage,
+                    "quality_score": round(quality_score, 3),
+                    "quality_grade": self._get_quality_grade(quality_score),
+                },
+                "image_info": {
+                    "width": image.size[0],
+                    "height": image.size[1],
+                    "format": image.format,
+                },
+            }
+        except Exception as exc:  # pylint: disable=broad-except
+            logging.getLogger(__name__).error("Error running defect classifier: %s", exc)
+            return {
+                "success": False,
+                "error": str(exc),
+                "detections": [],
+                "summary": {
+                    "total_defects": 0,
+                    "defect_types": {},
+                    "defect_percentage": 0,
+                    "quality_score": 0,
+                    "quality_grade": "Unknown",
+                },
+            }
+
+    def _get_quality_grade(self, score: float) -> str:
+        if score >= 0.9:
+            return "A+"
+        if score >= 0.8:
+            return "A"
+        if score >= 0.7:
+            return "B+"
+        if score >= 0.6:
+            return "B"
+        if score >= 0.5:
+            return "C+"
+        if score >= 0.4:
+            return "C"
+        if score >= 0.3:
+            return "D"
+        return "F"
+
+
+def create_defect_detector(model_path: str = "models/best_model.pth", device: str = "cpu"):
+    """
+    Create a defect detector. Prefer the MobileNetV3 classifier (defect_mobilenet_best.pth)
+    when available; otherwise fall back to Faster R-CNN detector.
+    """
+    # Prefer explicit env override
+    classifier_override = os.getenv("DEFECT_CLASSIFIER_PATH")
+    candidates = []
+
+    # Root directory for model assets (default: backend/models relative to this file)
+    repo_root = Path(__file__).resolve().parent.parent
+    models_dir = repo_root / "models"
+
+    if classifier_override:
+        candidates.append(Path(classifier_override))
+
+    # Prefer colocated MobileNet weight beside provided model_path
+    candidates.append(Path(model_path).with_name("defect_mobilenet_best.pth"))
+    # Also look in backend/models explicitly
+    candidates.append(models_dir / "defect_mobilenet_best.pth")
+
+    for candidate in candidates:
+        if candidate.exists():
+            labels_path = candidate.with_suffix(".json")
+            default_classes = [
+                "insect_damage",
+                "nugget",
+                "quaker",
+                "roasted-beans",
+                "shell",
+                "under_roast",
+            ]
+            class_names = _load_class_names(labels_path, fallback=default_classes)
+            return DefectClassificationService(str(candidate), class_names, device=device)
+
     return DefectDetectionService(model_path, device)

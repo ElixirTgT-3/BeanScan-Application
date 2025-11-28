@@ -1,6 +1,6 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from typing import Optional
+from typing import Optional, Dict, Any, Iterable
 import os
 import uuid
 from datetime import datetime
@@ -8,6 +8,7 @@ import torch
 import torchvision.transforms as transforms
 from PIL import Image
 import io
+import copy
 
 from ml.custom_models import BeanScanEnsemble, create_models
 from database.supabase_client import supabase, BEAN_IMAGE_TABLE, BEAN_TYPE_TABLE, DEFECT_TABLE, SHELF_LIFE_TABLE, HISTORY_TABLE
@@ -114,6 +115,162 @@ transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
+DEFAULT_MODEL_INPUT_WIDTH = 224.0
+DEFAULT_MODEL_INPUT_HEIGHT = 224.0
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            return float(cleaned)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _maybe_scale_value(raw: Optional[float], scale: float) -> Optional[float]:
+    if raw is None:
+        return None
+    return float(raw * scale)
+
+
+def _normalize_defect_results(defects: Iterable[Dict[str, Any]], original_width: float, original_height: float):
+    """
+    Ensure defect coordinates, bbox, and area are expressed in the original image reference frame.
+    """
+    if not defects:
+        return defects
+
+    normalized = []
+    original_width = float(original_width)
+    original_height = float(original_height)
+
+    for defect in defects:
+        if not isinstance(defect, dict):
+            normalized.append(defect)
+            continue
+        defect_copy = copy.deepcopy(defect)
+
+        model_input_width = (
+            _safe_float(defect_copy.get('image_width')) or
+            _safe_float(defect_copy.get('model_input_width')) or
+            _safe_float((defect_copy.get('image_size') or {}).get('width')) or
+            DEFAULT_MODEL_INPUT_WIDTH
+        )
+        model_input_height = (
+            _safe_float(defect_copy.get('image_height')) or
+            _safe_float(defect_copy.get('model_input_height')) or
+            _safe_float((defect_copy.get('image_size') or {}).get('height')) or
+            DEFAULT_MODEL_INPUT_HEIGHT
+        )
+
+        scale_x = 1.0
+        scale_y = 1.0
+        if model_input_width and abs(model_input_width - original_width) > 1.0:
+            scale_x = original_width / model_input_width
+        if model_input_height and abs(model_input_height - original_height) > 1.0:
+            scale_y = original_height / model_input_height
+
+        coords = defect_copy.get('coordinates') or {}
+        if not isinstance(coords, dict):
+            coords = {}
+        coords = {k: _safe_float(v) for k, v in coords.items()}
+
+        # Check if we have explicit corner coordinates first (x1, y1, x2, y2)
+        x1 = _maybe_scale_value(coords.get('x1') or coords.get('left') or coords.get('xmin'), scale_x)
+        y1 = _maybe_scale_value(coords.get('y1') or coords.get('top') or coords.get('ymin'), scale_y)
+        x2 = _maybe_scale_value(coords.get('x2') or coords.get('right') or coords.get('xmax'), scale_x)
+        y2 = _maybe_scale_value(coords.get('y2') or coords.get('bottom') or coords.get('ymax'), scale_y)
+
+        width_val = coords.get('width') or coords.get('w')
+        height_val = coords.get('height') or coords.get('h')
+        
+        # If we don't have corner coordinates, check if we have center coordinates (x, y)
+        # Model may output center coordinates, which need to be converted to corners
+        center_x = coords.get('x')
+        center_y = coords.get('y')
+        
+        if x1 is None and center_x is not None and width_val is not None:
+            # Treat x/y as center coordinates: x1 = x - w/2, x2 = x + w/2
+            scaled_width = width_val * scale_x
+            x1 = (center_x * scale_x) - (scaled_width / 2.0)
+            x2 = (center_x * scale_x) + (scaled_width / 2.0)
+        elif x2 is None and x1 is not None and width_val is not None:
+            # Standard case: x1 is top-left, compute x2 from width
+            x2 = x1 + width_val * scale_x
+        
+        if y1 is None and center_y is not None and height_val is not None:
+            # Treat x/y as center coordinates: y1 = y - h/2, y2 = y + h/2
+            scaled_height = height_val * scale_y
+            y1 = (center_y * scale_y) - (scaled_height / 2.0)
+            y2 = (center_y * scale_y) + (scaled_height / 2.0)
+        elif y2 is None and y1 is not None and height_val is not None:
+            # Standard case: y1 is top-left, compute y2 from height
+            y2 = y1 + height_val * scale_y
+
+        updated_coords = {}
+        if x1 is not None:
+            updated_coords['x1'] = float(x1)
+        if y1 is not None:
+            updated_coords['y1'] = float(y1)
+        if x2 is not None:
+            updated_coords['x2'] = float(x2)
+        if y2 is not None:
+            updated_coords['y2'] = float(y2)
+        if x1 is not None and x2 is not None:
+            updated_coords['width'] = float(max(0.0, x2 - x1))
+        if y1 is not None and y2 is not None:
+            updated_coords['height'] = float(max(0.0, y2 - y1))
+
+        bbox = defect_copy.get('bbox')
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            scaled_bbox = [
+                _maybe_scale_value(_safe_float(bbox[0]), scale_x),
+                _maybe_scale_value(_safe_float(bbox[1]), scale_y),
+                _maybe_scale_value(_safe_float(bbox[2]), scale_x),
+                _maybe_scale_value(_safe_float(bbox[3]), scale_y),
+            ]
+        else:
+            scaled_bbox = None
+
+        area = _safe_float(defect_copy.get('area'))
+        if area is not None:
+            area = float(area * scale_x * scale_y)
+
+        defect_copy['coordinates'] = updated_coords if updated_coords else defect_copy.get('coordinates')
+        defect_copy['defect_coordinates'] = updated_coords if updated_coords else defect_copy.get('defect_coordinates')
+        if scaled_bbox is not None:
+            defect_copy['bbox'] = scaled_bbox
+        if area is not None:
+            defect_copy['area'] = area
+
+        defect_copy['image_width'] = original_width
+        defect_copy['image_height'] = original_height
+        defect_copy['image_size'] = {
+            'width': original_width,
+            'height': original_height,
+        }
+        defect_copy['model_input_width'] = float(model_input_width or DEFAULT_MODEL_INPUT_WIDTH)
+        defect_copy['model_input_height'] = float(model_input_height or DEFAULT_MODEL_INPUT_HEIGHT)
+        defect_copy['model_input_size'] = {
+            'width': float(model_input_width or DEFAULT_MODEL_INPUT_WIDTH),
+            'height': float(model_input_height or DEFAULT_MODEL_INPUT_HEIGHT),
+        }
+        if scale_x != 1.0 or scale_y != 1.0:
+            defect_copy['coordinate_space'] = 'original_image'
+            defect_copy['scaled_from_model_input'] = True
+
+        normalized.append(defect_copy)
+
+    return normalized
+
 @router.post("/scan")
 async def scan_bean_image(
     image: UploadFile = File(...),
@@ -186,7 +343,13 @@ async def scan_bean_image(
             
             # Extract results
             bean_classification = analysis_results['bean_classification']
-            defect_detection = analysis_results['defect_detection']
+            original_width, original_height = image_pil.size
+            defect_detection = _normalize_defect_results(
+                analysis_results['defect_detection'],
+                original_width,
+                original_height,
+            )
+            analysis_results['defect_detection'] = defect_detection
             health_score = analysis_results['health_score']
             
             print(f"[STATS] Analysis complete: Bean={bean_classification[0]['class']}, Health={health_score['grade']}")
@@ -405,7 +568,11 @@ async def scan_bean_image(
                     },
                     "defect_detection": {
                         "detections": defect_detection,
-                        "summary": defect_summary
+                        "summary": defect_summary,
+                        "image_dimensions": {
+                            "width": float(original_width),
+                            "height": float(original_height)
+                        }
                     },
                     # bean_count removed
                     "health_score": health_score,

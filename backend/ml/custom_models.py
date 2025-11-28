@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,6 +12,8 @@ from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 import torchvision.transforms as transforms
 from typing import Dict, List, Tuple, Optional
 import numpy as np
+
+from .defect_classifier_mobilenet import CoffeeNetCNN
 
 class MobileNetV3Backbone(nn.Module):
     """Custom MobileNetV3 backbone for feature extraction - matches trained model architecture"""
@@ -39,9 +43,27 @@ class MobileNetV3Backbone(nn.Module):
 class BeanClassifierCNN(nn.Module):
     """CNN for bean type classification using MobileNetV3 backbone"""
     
-    def __init__(self, num_classes: int = 4, pretrained: bool = True):
+    def __init__(
+        self,
+        num_classes: int = 4,
+        pretrained: bool = True,
+        class_names: Optional[List[str]] = None,
+    ):
         super().__init__()
         self.backbone = MobileNetV3Backbone(pretrained=pretrained)
+
+        default_class_names = ["Liberica", "Arabica", "Robusta", "Excelsa"]  # CoffeeNet order
+        if class_names is not None:
+            if len(class_names) == 0:
+                raise ValueError("class_names must contain at least one entry")
+            self.class_names = class_names
+            num_classes = len(class_names)
+        else:
+            if num_classes <= len(default_class_names):
+                self.class_names = default_class_names[:num_classes]
+            else:
+                extra = [f"Class_{i}" for i in range(len(default_class_names), num_classes)]
+                self.class_names = default_class_names + extra
         
         # Classification head (increased dropout ~0.3 to mitigate overfitting)
         self.classifier = nn.Sequential(
@@ -53,9 +75,6 @@ class BeanClassifierCNN(nn.Module):
             nn.Dropout(0.3),
             nn.Linear(256, num_classes)
         )
-        
-        # Bean type names
-        self.class_names = ["Arabica", "Robusta", "Liberica", "Excelsa"]
         
     def forward(self, x):
         features = self.backbone(x)
@@ -91,25 +110,20 @@ class BeanClassifierCNN(nn.Module):
             probabilities = probabilities.view(num_augs, num_samples, -1).mean(dim=0)
 
             confidence, predicted = torch.max(probabilities, 1)
-            
-            # Filter by confidence threshold
-            mask = confidence >= threshold
+
             predictions = []
-            
+
             for i in range(len(predicted)):
-                if mask[i]:
-                    predictions.append({
-                        'class': self.class_names[predicted[i].item()],
-                        'confidence': confidence[i].item(),
-                        'probabilities': probabilities[i].tolist()
-                    })
-                else:
-                    predictions.append({
-                        'class': 'Unknown',
-                        'confidence': confidence[i].item(),
-                        'probabilities': probabilities[i].tolist()
-                    })
-            
+                top_class_index = predicted[i].item()
+                top_probability = confidence[i].item()
+                class_name = self.class_names[top_class_index]
+                predictions.append({
+                    'class': class_name,
+                    'confidence': top_probability,
+                    'probabilities': probabilities[i].tolist(),
+                    'is_low_confidence': bool(top_probability < threshold),
+                })
+
             return predictions
 
 class DefectDetectorMaskRCNN(nn.Module):
@@ -183,7 +197,64 @@ class DefectDetectorMaskRCNN(nn.Module):
                         }
                         defects.append(defect)
             
-            return defects
+        return defects
+
+
+class DefectClassifierAdapter(nn.Module):
+    """
+    Adapter to use MobileNetV3 Small defect classifier with the same interface
+    as the detector's detect_defects method.
+    """
+
+    def __init__(self, classifier: CoffeeNetCNN, class_names: List[str], device: torch.device):
+        super().__init__()
+        self.classifier = classifier
+        self.class_names = class_names
+        self.device = device
+
+    def detect_defects(self, image, confidence_threshold: float = 0.5):
+        self.classifier.eval()
+        try:
+            if isinstance(image, torch.Tensor):
+                tensor = image.to(self.device)
+                if tensor.dim() == 3:
+                    tensor = tensor.unsqueeze(0)
+            else:
+                raise ValueError("Expected image tensor for defect classification")
+
+            with torch.no_grad():
+                logits = self.classifier(tensor)
+                probs = F.softmax(logits, dim=1)
+                conf, idx = probs.max(dim=1)
+
+            confidence = conf[0].item()
+            pred_idx = idx[0].item()
+            predicted_class = self.class_names[pred_idx] if pred_idx < len(self.class_names) else f"class_{pred_idx}"
+
+            # Classes considered "clean"
+            clean_tokens = {"healthy", "no_defect", "clean", "none", "background"}
+            is_clean = predicted_class.lower() in clean_tokens
+
+            detections = []
+            if not is_clean and confidence >= confidence_threshold:
+                detections.append(
+                    {
+                        "bbox": None,
+                        "confidence": float(confidence),
+                        "defect_type": predicted_class,
+                        "area": 0.0,
+                        "coordinates": None,
+                        "center": None,
+                        "image_width": None,
+                        "image_height": None,
+                        "image_size": {"width": None, "height": None},
+                    }
+                )
+
+            return detections
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[ERROR] DefectClassifierAdapter failed: {exc}")
+            return []
 
 class DefectDetectorFasterRCNN(nn.Module):
     """Faster R-CNN detector (bounding boxes only) for bean defects"""
@@ -255,9 +326,6 @@ class RuleBasedShelfLife:
             'Other': 180      # ≈6 months fallback
         }
         
-        # Shelf life categories
-        self.shelf_life_categories = ["Expired", "Critical", "Warning", "Good", "Excellent"]
-
         # Severity bands (percentage ranges with peak values and scaling information)
         self.severity_bands = [
             {
@@ -568,15 +636,51 @@ class BeanScanEnsemble(nn.Module):
         else:
             return 'F'
 
+def _load_defect_class_names(weights_path: Path) -> List[str]:
+    default_classes = [
+        "insect_damage",
+        "nugget",
+        "quaker",
+        "roasted-beans",
+        "shell",
+        "under_roast",
+    ]
+    try:
+        label_path = weights_path.with_suffix(".json")
+        if label_path.exists():
+            with open(label_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [str(x) for x in data]
+            if isinstance(data, dict):
+                if "classes" in data and isinstance(data["classes"], list):
+                    return [str(x) for x in data["classes"]]
+                return [v for k, v in sorted(data.items(), key=lambda kv: int(kv[0]))]
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARNING] Failed to load defect class names: {exc}")
+    return default_classes
+
+
 # Utility functions
 def create_models(device: str = 'cpu'):
     """Create and initialize all models"""
     device = torch.device(device)
+    models_dir = Path(__file__).resolve().parent.parent / "models"
     
     # Initialize models
     cnn = BeanClassifierCNN(num_classes=4, pretrained=True)
-    defect_detector = DefectDetectorMaskRCNN(num_classes=6, pretrained=True)
     shelf_life_model = RuleBasedShelfLife()  # Rule-based instead of LSTM
+
+    # Choose defect model: prefer MobileNet classifier if weights exist
+    mobilenet_defect_path = models_dir / "defect_mobilenet_best.pth"
+    if mobilenet_defect_path.exists():
+        class_names = _load_defect_class_names(mobilenet_defect_path)
+        defect_backbone = CoffeeNetCNN(num_classes=len(class_names), pretrained=False)
+        defect_detector = DefectClassifierAdapter(defect_backbone, class_names, device)
+        print(f"[INFO] Using MobileNet defect classifier: {mobilenet_defect_path}")
+    else:
+        defect_detector = DefectDetectorMaskRCNN(num_classes=6, pretrained=True)
+        print("[INFO] Using Faster R-CNN defect detector (no MobileNet weights found)")
     
     # Move to device (rule-based model doesn't need device)
     cnn.to(device)
@@ -595,7 +699,7 @@ def create_models(device: str = 'cpu'):
     }
     
     # Load saved weights
-    load_models(device=device, models=models)
+    load_models(device=device, models=models, model_dir=str(models_dir))
     
     return models
 
@@ -640,7 +744,7 @@ def load_models(device: str = 'cpu', models: Dict = None, model_dir: str = './mo
         # Map model names to actual file names
         model_file_map = {
             'cnn': 'cnn_best.pth',
-            'defect_detector': 'best_model.pth'  # Use best_model.pth for defect detection
+            'defect_detector': 'defect_mobilenet_best.pth' if isinstance(model, DefectClassifierAdapter) else 'best_model.pth'
         }
         
         model_filename = model_file_map.get(name, f'{name}.pth')
@@ -648,7 +752,10 @@ def load_models(device: str = 'cpu', models: Dict = None, model_dir: str = './mo
         
         if os.path.exists(model_path):
             try:
-                model.load_state_dict(torch.load(model_path, map_location=device))
+                if isinstance(model, DefectClassifierAdapter):
+                    model.classifier.load_state_dict(torch.load(model_path, map_location=device))
+                else:
+                    model.load_state_dict(torch.load(model_path, map_location=device))
                 print(f"[OK] Loaded {name} model from {model_path}")
             except RuntimeError as e:
                 print(f"[WARNING] Architecture mismatch for {name} model: {str(e)[:100]}...")

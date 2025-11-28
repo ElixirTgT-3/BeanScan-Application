@@ -11,7 +11,63 @@ import '../utils/api_service.dart';
 import '../utils/local_history_store.dart';
 import '../utils/app_settings.dart';
 import '../utils/app_logger.dart';
+import '../utils/demo_override.dart';
 import 'results_page.dart';
+
+// Custom painter for sun icon with 8 rays
+class _SunIconPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.orange
+      ..style = PaintingStyle.fill;
+    
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 4; // Circle radius
+    
+    // Draw the central circle
+    canvas.drawCircle(center, radius, paint);
+    
+    // Draw 8 rays evenly spaced around the circle
+    final rayLength = 6.0;
+    final rayWidth = 2.0;
+    final rayDistance = radius + 2; // Distance from center to start of ray
+    
+    for (int i = 0; i < 8; i++) {
+      final angle = (i * math.pi / 4); // 8 rays = 45 degrees apart
+      final startX = center.dx + math.cos(angle) * rayDistance;
+      final startY = center.dy + math.sin(angle) * rayDistance;
+      final endX = center.dx + math.cos(angle) * (rayDistance + rayLength);
+      final endY = center.dy + math.sin(angle) * (rayDistance + rayLength);
+      
+      canvas.drawLine(
+        Offset(startX, startY),
+        Offset(endX, endY),
+        paint..strokeWidth = rayWidth..strokeCap = StrokeCap.round,
+      );
+    }
+  }
+  
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class _OverrideShapeOption {
+  final String beanType;
+  final IconData icon;
+
+  const _OverrideShapeOption({
+    required this.beanType,
+    required this.icon,
+  });
+}
+
+const List<_OverrideShapeOption> _overrideShapeOrder = [
+  _OverrideShapeOption(beanType: 'Excelsa', icon: Icons.crop_square_rounded),
+  _OverrideShapeOption(beanType: 'Arabica', icon: Icons.egg_outlined),
+  _OverrideShapeOption(beanType: 'Liberica', icon: Icons.change_history),
+  _OverrideShapeOption(beanType: 'Robusta', icon: Icons.circle_outlined),
+];
 
 void _logScanPage(
   String message, {
@@ -41,6 +97,16 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   bool _isCameraInitialized = false;
   bool _isFlashOn = false;
   bool _isPermissionGranted = false;
+  // Zoom state
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
+  double _currentZoom = 1.0;
+  double _gestureBaseZoom = 1.0;
+  // Exposure (brightness) state
+  double _minExposure = 0.0;
+  double _maxExposure = 0.0;
+  double _currentExposure = 0.0;
+  bool _showBrightnessControl = false;
 
   @override
   void initState() {
@@ -206,6 +272,18 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       );
 
       await _cameraController!.initialize();
+      // Query camera capabilities for zoom and exposure ranges
+      try {
+        _minZoom = await _cameraController!.getMinZoomLevel();
+        _maxZoom = await _cameraController!.getMaxZoomLevel();
+        _currentZoom = _currentZoom.clamp(_minZoom, _maxZoom);
+      } catch (_) {}
+      try {
+        _minExposure = await _cameraController!.getMinExposureOffset();
+        _maxExposure = await _cameraController!.getMaxExposureOffset();
+        _currentExposure = _currentExposure.clamp(_minExposure, _maxExposure);
+        await _cameraController!.setExposureOffset(_currentExposure);
+      } catch (_) {}
       
       if (mounted) {
         setState(() {
@@ -230,48 +308,21 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       return;
     }
 
+    final controller = _cameraController!;
+    late final XFile capturedImage;
     try {
       // Ensure flash is used if it's supposed to be on
       if (_isFlashOn) {
         debugPrint('Taking picture with flash ON');
-        await _cameraController!.setFlashMode(FlashMode.torch);
+        await controller.setFlashMode(FlashMode.torch);
         await Future.delayed(const Duration(milliseconds: 300)); // Longer delay for flash to activate
       } else {
         debugPrint('Taking picture with flash OFF');
-        await _cameraController!.setFlashMode(FlashMode.off);
+        await controller.setFlashMode(FlashMode.off);
       }
       
-      final XFile image = await _cameraController!.takePicture();
-      debugPrint('Picture taken: ${image.path}');
-      
-      // Show loading indicator
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Analyzing image...'),
-            backgroundColor: Colors.blue,
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
-      
-      // Basic validation: reject overly dark images before sending
-      final file = File(image.path);
-      if (await _isImageTooDark(file) || !(await _hasEnoughBrownPixels(file))) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Please upload a clear, well‑lit photo of coffee beans.'),
-              backgroundColor: Colors.orange,
-            ),
-          );
-        }
-        // Continue anyway; final decision will be made after model prediction
-      }
-
-      // Process the image with API
-      await _processImage(file, fromGallery: false);
-      
+      capturedImage = await controller.takePicture();
+      debugPrint('Picture taken: ${capturedImage.path}');
     } catch (e) {
       debugPrint('Error taking picture: $e');
       if (mounted) {
@@ -282,7 +333,53 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           ),
         );
       }
+      return;
+    } finally {
+      if (controller.value.isInitialized) {
+        try {
+          await controller.setFlashMode(FlashMode.off);
+        } catch (flashError) {
+          debugPrint('Failed to reset flash: $flashError');
+        }
+      }
+      if (_isFlashOn) {
+        if (mounted) {
+          setState(() {
+            _isFlashOn = false;
+          });
+        } else {
+          _isFlashOn = false;
+        }
+      }
     }
+
+    // Show loading indicator
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Analyzing image...'),
+          backgroundColor: Colors.blue,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+    
+    // Basic validation: reject overly dark images before sending
+    final file = File(capturedImage.path);
+    if (await _isImageTooDark(file) || !(await _hasEnoughBrownPixels(file))) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please upload a clear, well-lit photo of coffee beans.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      // Continue anyway; final decision will be made after model prediction
+    }
+
+    // Process the image with API
+    await _processImage(file, fromGallery: false);
   }
 
   Future<void> _switchCamera() async {
@@ -337,24 +434,73 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     }
   }
 
+  void _toggleBrightnessControlVisibility() {
+    _showBrightnessControl = !_showBrightnessControl;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _cycleOverrideSelection() {
+    final demo = DemoOverride();
+    if (!demo.isEnabled) return;
+
+    final current = demo.overrideBeanType;
+    int nextIndex = 0;
+    if (current != null) {
+      final currentIndex = _overrideShapeOrder.indexWhere(
+        (option) => option.beanType.toLowerCase() == current.toLowerCase(),
+      );
+      nextIndex = currentIndex == -1
+          ? 0
+          : (currentIndex + 1) % _overrideShapeOrder.length;
+    }
+    demo.setOverride(_overrideShapeOrder[nextIndex].beanType);
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _handleCameraTap() {
+    final demo = DemoOverride();
+    if (demo.isEnabled) {
+      _cycleOverrideSelection();
+    } else {
+      _toggleBrightnessControlVisibility();
+    }
+  }
+
   Future<void> _processImage(File imageFile, {required bool fromGallery}) async {
     try {
-      // Show loading dialog
+      final demo = DemoOverride();
+      
+      // Show loading dialog with demo override capability
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (BuildContext context) {
-          return const AlertDialog(
-            content: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(width: 20),
-                Expanded(
-                  child: Text("Analyzing bean type and detecting defects..."),
+        builder: (BuildContext dialogContext) {
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              return DemoOverrideLoadingOverlay(
+                child: AlertDialog(
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          CircularProgressIndicator(),
+                          SizedBox(width: 20),
+                          Expanded(
+                            child: Text("Analyzing bean type and detecting defects..."),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-              ],
-            ),
+              );
+            },
           );
         },
       );
@@ -390,13 +536,26 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         final double derivedConfidence = ((healthScorePercentage / 100).clamp(0.0, 1.0)).toDouble();
 
         // Convert the prediction data to BeanPrediction object
-        final predictionData = testResult['data']['data']['prediction'];
+        // Apply demo override if enabled
+        Map<String, dynamic> predictionData = Map<String, dynamic>.from(
+          testResult['data']['data']['prediction'] as Map
+        );
+        
+        // Apply demo override if set
+        if (demo.isEnabled) {
+          if (demo.overrideBeanType == null) {
+            demo.initFromPrediction(predictionData['predicted_class']?.toString() ?? '');
+          }
+          predictionData = demo.applyOverride(predictionData);
+          _logScanPage('  - Demo override applied: ${demo.overrideBeanType}');
+        }
+        
         _logScanPage('  - predictionData: $predictionData');
 
         // Validate that the image looks like coffee beans
         String predictedClass = (predictionData['predicted_class'] ?? '').toString();
         double predictedConfidence = (predictionData['confidence'] ?? 0.0).toDouble();
-        const List<String> beanTypes = ['Arabica', 'Robusta', 'Liberica', 'Excelsa'];
+        const List<String> beanTypes = kBeanTypes;
         final List<dynamic> probabilitiesRaw =
             predictionData['all_probabilities'] as List<dynamic>? ?? const <dynamic>[];
         final List<double> probabilityValues = [
@@ -951,22 +1110,32 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       return _buildPermissionRequest();
     }
 
-    return Container(
-      color: AppColors.scanDarkGrey,
-      child: SafeArea(
-        child: Column(
-          children: [
-            _buildHeader(context),
-            _buildTitleAndInstructions(),
-            const SizedBox(height: 12), // Balanced spacing
-            _buildCameraViewfinder(),
-            const SizedBox(height: 12), // Balanced spacing
-            _buildUploadButton(),
-            const SizedBox(height: 8), // Smaller spacing before controls
-            _buildCameraControls(),
-          ],
+    return Stack(
+      children: [
+        Container(
+          color: AppColors.scanDarkGrey,
+          child: SafeArea(
+            child: Column(
+              children: [
+                _buildHeader(context),
+                _buildTitleAndInstructions(),
+                const SizedBox(height: 12), // Balanced spacing
+                _buildCameraViewfinder(),
+                const SizedBox(height: 12), // Balanced spacing
+                _buildUploadButton(),
+                const SizedBox(height: 8), // Smaller spacing before controls
+                _buildCameraControls(),
+              ],
+            ),
+          ),
         ),
-      ),
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: _buildOverrideBanner(),
+        ),
+      ],
     );
   }
 
@@ -1150,6 +1319,93 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
             _buildCameraPlaceholder(),
           if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
             _buildCornerBrackets(),
+          // Brightness Control - Fixed vertical slider on the right side (like phone camera)
+          if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized && _showBrightnessControl)
+            Positioned(
+              right: 20,
+              top: 0,
+              bottom: 0,
+              child: AnimatedOpacity(
+                opacity: _showBrightnessControl ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 200),
+                child: Center(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque, // Make sure gestures are captured
+                    onVerticalDragStart: (details) {
+                      // Store the starting position for relative movement
+                    },
+                    onVerticalDragUpdate: (details) async {
+                      if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+                      
+                      // Calculate new brightness based on drag position
+                      // The slider is 200px tall, so map the drag to that range
+                      final sliderHeight = 200.0;
+                      final totalRange = _maxExposure - _minExposure;
+                      final sensitivity = totalRange / sliderHeight;
+                      final delta = -details.primaryDelta! * sensitivity;
+                      final newExposure = (_currentExposure + delta).clamp(_minExposure, _maxExposure);
+                      
+                      _currentExposure = newExposure;
+                      try { 
+                        await _cameraController!.setExposureOffset(_currentExposure); 
+                      } catch (e) {
+                        debugPrint('Exposure error: $e');
+                      }
+                      if (mounted) setState(() {});
+                    },
+                    onTapDown: (details) async {
+                      if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+                      
+                      // Calculate brightness based on tap position
+                      final sliderHeight = 200.0;
+                      final localY = details.localPosition.dy;
+                      final normalizedY = (localY / sliderHeight).clamp(0.0, 1.0);
+                      // Top = max exposure (bright), bottom = min exposure (dark)
+                      final newExposure = _maxExposure - (normalizedY * (_maxExposure - _minExposure));
+                      
+                      _currentExposure = newExposure.clamp(_minExposure, _maxExposure);
+                      try { 
+                        await _cameraController!.setExposureOffset(_currentExposure); 
+                      } catch (e) {
+                        debugPrint('Exposure error: $e');
+                      }
+                      if (mounted) setState(() {});
+                    },
+                    child: Container(
+                      width: 60, // Wider touch area for easier interaction
+                      height: 200, // Shorter slider
+                      padding: const EdgeInsets.symmetric(horizontal: 18),
+                      child: Stack(
+                        children: [
+                          // Vertical line - thin orange line through center
+                          Positioned(
+                            left: 18,
+                            top: 0,
+                            bottom: 0,
+                            child: Container(
+                              width: 2, // Thin line
+                              decoration: BoxDecoration(
+                                color: Colors.orange,
+                                borderRadius: BorderRadius.circular(1),
+                              ),
+                            ),
+                          ),
+                          // Sun icon with 8 rays - positioned on the vertical line
+                          Positioned(
+                            left: 1, // Center on the line (line center is at x=19, sun is 36px wide, so left: 19-18=1)
+                            top: (_maxExposure - _currentExposure) / (_maxExposure - _minExposure) * 200 - 18,
+                            child: CustomPaint(
+                              size: const Size(36, 36),
+                              painter: _SunIconPainter(),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -1189,7 +1445,39 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   }
 
   Widget _buildFullCameraPreview() {
-    return CameraPreview(_cameraController!);
+    return GestureDetector(
+      // Handle pinch zoom (two or more fingers) - works in all directions
+      onScaleStart: (details) {
+        // Only handle zoom if 2+ fingers
+        if (details.pointerCount >= 2) {
+          _gestureBaseZoom = _currentZoom;
+        }
+      },
+      onScaleUpdate: (details) async {
+        if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+        // Only handle zoom if it's a pinch gesture (2+ fingers)
+        // Zoom works in all directions - scale is direction-independent
+        if (details.pointerCount >= 2) {
+          // Calculate zoom based on scale - works regardless of pinch direction
+          // Scale is calculated from the distance between two pointers, so it works in all directions
+          final desired = (_gestureBaseZoom * details.scale).clamp(_minZoom, _maxZoom);
+          _currentZoom = desired;
+          try { 
+            await _cameraController!.setZoomLevel(_currentZoom); 
+          } catch (e) {
+            debugPrint('Zoom error: $e');
+          }
+          if (mounted) setState(() {});
+        }
+      },
+      onScaleEnd: (details) {
+        // Zoom gesture ended
+      },
+      // Handle tap to cycle demo override (or toggle brightness when override is off)
+      onTap: _handleCameraTap,
+      onLongPress: _toggleBrightnessControlVisibility,
+      child: CameraPreview(_cameraController!),
+    );
   }
 
   Widget _buildCornerBrackets() {
@@ -1256,6 +1544,41 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildOverrideBanner() {
+    final demo = DemoOverride();
+    if (!demo.isEnabled) {
+      return const SizedBox.shrink();
+    }
+
+    final String? overrideType = demo.overrideBeanType;
+    final _OverrideShapeOption activeOption = (() {
+      if (overrideType == null) return _overrideShapeOrder.first;
+      return _overrideShapeOrder.firstWhere(
+        (option) => option.beanType.toLowerCase() == overrideType.toLowerCase(),
+        orElse: () => _overrideShapeOrder.first,
+      );
+    })();
+
+    return SafeArea(
+      bottom: false,
+      child: Align(
+        alignment: Alignment.topLeft,
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: _cycleOverrideSelection,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+            child: Icon(
+              activeOption.icon,
+              color: Colors.white.withOpacity(0.1),
+              size: 22,
+            ),
+          ),
+        ),
+      ),
     );
   }
 

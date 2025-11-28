@@ -53,6 +53,22 @@ class ResultsPage extends StatelessWidget {
     this.fromHistory = false,
   });
 
+  const ResultsPage.history({
+    Key? key,
+    required BeanPrediction prediction,
+    required String imagePath,
+    Map<String, dynamic>? defectDetection,
+    Map<String, dynamic>? shelfLife,
+  }) : this(
+          key: key,
+          prediction: prediction,
+          imagePath: imagePath,
+          defectDetection: defectDetection,
+          shelfLife: shelfLife,
+          shouldAutoSave: false,
+          fromHistory: true,
+        );
+
   @override
   Widget build(BuildContext context) {
     // Debug log to see what data we're receiving
@@ -108,15 +124,8 @@ class ResultsPage extends StatelessWidget {
               _buildSeverityAndDefectiveTiles(colorScheme),
               const SizedBox(height: AppConstants.largeSpacing),
               if (!fromHistory) ...[
-                Text(
-                  'Scan another image?',
-                  style: textTheme.titleSmall?.copyWith(
-                    color: colorScheme.primary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: AppConstants.smallSpacing),
-                _buildYesNoButtons(context),
+                _buildActionButtons(context, colorScheme),
+                const SizedBox(height: AppConstants.largeSpacing),
               ],
             ],
           ),
@@ -788,40 +797,41 @@ class ResultsPage extends StatelessWidget {
     }
 
     final List<dynamic> detections = _getDetections();
+        // Get backend-provided image dimensions first (coordinates are in this space)
     final Size? detectionSize = _resolveOriginalDetectionSize(detections);
 
+        // For camera images, EXIF orientation might cause mismatch between backend and displayed dimensions
+        // Get both backend dimensions (for coordinates) and actual displayed dimensions (for rendering)
     return FutureBuilder<Size?>(
-      future: _resolveImageDisplaySize(detectionSize),
+          future: _resolveImageDisplaySize(null), // Get actual displayed image size (after EXIF)
       builder: (context, snapshot) {
-        final Size? resolvedSize = snapshot.data ?? detectionSize;
+            final Size? actualDisplayedSize = snapshot.data; // Actual size Flutter displays (after EXIF)
         final bool hasDetections = detections.isNotEmpty;
+            // CRITICAL: Backend coordinates are in backend's coordinate space (after PIL applies EXIF)
+            // But Flutter might display the image at different dimensions if EXIF handling differs
+            // Use backend dimensions for coordinate space, but we'll adjust if there's a mismatch
+            final Size? coordinateSpaceSize = detectionSize;
+            
+            // Debug: Check if there's a dimension mismatch (indicates EXIF orientation issue)
+            if (detectionSize != null && actualDisplayedSize != null) {
+              final bool dimensionsMatch = (detectionSize.width - actualDisplayedSize.width).abs() < 1.0 &&
+                                          (detectionSize.height - actualDisplayedSize.height).abs() < 1.0;
+              if (!dimensionsMatch) {
+                debugPrint('[ResultsPage] WARNING: Dimension mismatch detected! '
+                  'Backend: ${detectionSize.width}x${detectionSize.height}, '
+                  'Displayed: ${actualDisplayedSize.width}x${actualDisplayedSize.height}. '
+                  'This suggests EXIF orientation mismatch between backend and Flutter.');
+              }
+            }
+            
+                // Debug: Log which dimensions we're using
+            if (coordinateSpaceSize != null) {
+              debugPrint('[ResultsPage] Using coordinate space: ${coordinateSpaceSize.width}x${coordinateSpaceSize.height} '
+                '(detectionSize: ${detectionSize?.width}x${detectionSize?.height}, '
+                'actualDisplayedSize: ${actualDisplayedSize?.width}x${actualDisplayedSize?.height})');
+            }
 
-        Widget imageStack = Stack(
-          fit: StackFit.expand,
-          children: [
-            Positioned.fill(child: _buildImageWidget(context, colorScheme, fit: BoxFit.fill)),
-            if (hasDetections)
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: _buildDefectAnnotations(resolvedSize),
-                ),
-              ),
-            if (defectDetection != null && defectDetection!['summary'] != null)
-              _buildDefectCountOverlay(colorScheme),
-          ],
-        );
-
-        if (resolvedSize != null && resolvedSize.width > 0 && resolvedSize.height > 0) {
-          imageStack = FittedBox(
-            fit: BoxFit.contain,
-            alignment: Alignment.center,
-            child: SizedBox(
-              width: resolvedSize.width,
-              height: resolvedSize.height,
-              child: imageStack,
-            ),
-          );
-        }
+        // Image widget will be built inside LayoutBuilder with calculated size
 
         return Container(
           height: 220,
@@ -837,7 +847,90 @@ class ResultsPage extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           child: ClipRRect(
             borderRadius: BorderRadius.circular(AppConstants.largeRadius),
-            child: imageStack,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // Get actual rendered container size
+                final containerSize = Size(constraints.maxWidth, constraints.maxHeight);
+                debugPrint('[ResultsPage] LayoutBuilder - containerSize: ${containerSize.width}x${containerSize.height}');
+                
+                // Calculate displayed image size based on BoxFit.contain
+                // This matches what the image widget will actually render
+                double displayedWidth = containerSize.width;
+                double displayedHeight = containerSize.height;
+                double offsetX = 0.0;
+                double offsetY = 0.0;
+                
+                // Use actualDisplayedSize for aspect ratio if available (accounts for EXIF rotation)
+                // Otherwise fall back to coordinateSpaceSize (backend dimensions)
+                final Size? sizeForAspectRatio = actualDisplayedSize ?? coordinateSpaceSize;
+                
+                if (sizeForAspectRatio != null) {
+                  final imageAspectRatio = sizeForAspectRatio.width / sizeForAspectRatio.height;
+                  final containerAspectRatio = containerSize.width / containerSize.height;
+                  
+                  if (imageAspectRatio > containerAspectRatio) {
+                    // Image is wider - fit to width
+                    displayedWidth = containerSize.width;
+                    displayedHeight = containerSize.width / imageAspectRatio;
+                    offsetY = (containerSize.height - displayedHeight) / 2.0;
+                  } else {
+                    // Image is taller - fit to height
+                    displayedHeight = containerSize.height;
+                    displayedWidth = containerSize.height * imageAspectRatio;
+                    offsetX = (containerSize.width - displayedWidth) / 2.0;
+                  }
+                  
+                  debugPrint('[ResultsPage] Image positioning - using ${sizeForAspectRatio.width}x${sizeForAspectRatio.height} for aspect ratio, '
+                    'displayed: ${displayedWidth}x${displayedHeight}, offset: ($offsetX, $offsetY)');
+                }
+                
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    // Image layer - positioned at calculated offset to match CustomPaint coordinates
+                    // The image must be displayed at exactly the calculated size for coordinates to align
+                    // Use FittedBox to ensure the image scales to fill the exact dimensions
+                    Positioned(
+                      left: offsetX,
+                      top: offsetY,
+                      child: SizedBox(
+                        width: displayedWidth,
+                        height: displayedHeight,
+                        child: _buildImageWidget(
+                          context, 
+                          colorScheme, 
+                          fit: BoxFit.contain,
+                        ),
+                      ),
+                    ),
+                    // Defect annotations overlay - positioned at container level to get correct size
+                    // CRITICAL: The CustomPaint must receive the same container size and use the same
+                    // offset calculations as the image positioning above
+                    if (hasDetections)
+                      IgnorePointer(
+                        child: SizedBox(
+                          width: containerSize.width,
+                          height: containerSize.height,
+                          child: CustomPaint(
+                            painter: DefectAnnotationPainter(
+                              _getDetections(),
+                              originalSize: coordinateSpaceSize,
+                              actualDisplayedSize: actualDisplayedSize,
+                              imageDisplayedSize: displayedWidth > 0 && displayedHeight > 0 
+                                  ? Size(displayedWidth, displayedHeight) 
+                                  : null,
+                              imageOffset: Offset(offsetX, offsetY),
+                            ),
+                          ),
+                        ),
+                      ),
+                    // Defect count overlay
+                    if (defectDetection != null && defectDetection!['summary'] != null)
+                      _buildDefectCountOverlay(colorScheme),
+                  ],
+                );
+              },
+            ),
           ),
         );
       },
@@ -858,8 +951,9 @@ class ResultsPage extends StatelessWidget {
       return Image.network(
         url,
         fit: fit,
-        width: double.infinity,
-        height: double.infinity,
+        // Don't use infinite constraints - let parent SizedBox control size
+        // width: double.infinity,
+        // height: double.infinity,
         errorBuilder: (c, e, s) {
           _logResultsPage('_buildImageWidget Image.network error: $e');
           return Center(
@@ -893,8 +987,9 @@ class ResultsPage extends StatelessWidget {
     return Image.file(
       potentialFile,
       fit: fit,
-      width: double.infinity,
-      height: double.infinity,
+      // Don't use infinite constraints - let parent SizedBox control size
+      // width: double.infinity,
+      // height: double.infinity,
       errorBuilder: (c, e, s) {
         _logResultsPage('_buildImageWidget Image.file error: $e');
         return Center(
@@ -999,6 +1094,19 @@ class ResultsPage extends StatelessWidget {
   }
 
   Size? _resolveOriginalDetectionSize(List<dynamic> detections) {
+    // First, try to get image dimensions from defectDetection map (most reliable)
+    final dynamic detectionMeta = defectDetection?['image_dimensions'] ?? defectDetection?['image_size'];
+    double? metaWidth;
+    double? metaHeight;
+    if (detectionMeta is Map) {
+      metaWidth = _asDouble(detectionMeta['width']);
+      metaHeight = _asDouble(detectionMeta['height']);
+    }
+    if (metaWidth != null && metaHeight != null && metaWidth > 0 && metaHeight > 0) {
+      return Size(metaWidth, metaHeight);
+    }
+    
+    // Then check individual detections
     for (final detection in detections) {
       if (detection is! Map) continue;
       final map = Map<String, dynamic>.from(detection);
@@ -1017,6 +1125,37 @@ class ResultsPage extends StatelessWidget {
         return Size(width, height);
       }
     }
+
+    double maxX = 0;
+    double maxY = 0;
+    bool hasCoordinates = false;
+    for (final detection in detections) {
+      if (detection is! Map) continue;
+      final coords = detection['coordinates'];
+      if (coords is! Map) continue;
+      final double? x2 = _asDouble(coords['x2']);
+      final double? y2 = _asDouble(coords['y2']);
+      if (x2 != null) {
+        maxX = math.max(maxX, x2);
+        hasCoordinates = true;
+      }
+      if (y2 != null) {
+        maxY = math.max(maxY, y2);
+        hasCoordinates = true;
+      }
+    }
+    if (!hasCoordinates) {
+      return null;
+    }
+    if (maxX <= 1.0 && maxY <= 1.0) {
+      return const Size(1, 1);
+    }
+
+    final double largest = math.max(maxX, maxY);
+    if (largest > 0 && largest <= 256) {
+      return const Size(224, 224);
+    }
+
     return null;
   }
 
@@ -1363,6 +1502,8 @@ class ResultsPage extends StatelessWidget {
     if (severity == null || severity.isEmpty) return 'Unknown';
     final lower = severity.toLowerCase();
     switch (lower) {
+      case 'normal':
+        return 'Normal';
       case 'mild':
         return 'Mild';
       case 'moderate':
@@ -1479,6 +1620,8 @@ class ResultsPage extends StatelessWidget {
 
     final String lower = trimmed.toLowerCase();
     switch (lower) {
+      case 'normal':
+        return 'normal';
       case 'mild':
       case 'moderate':
       case 'severe':
@@ -1523,6 +1666,8 @@ class ResultsPage extends StatelessWidget {
 
   String _statusLabelFromSeverity(String normalizedSeverity) {
     switch (normalizedSeverity) {
+      case 'normal':
+        return 'Normal';
       case 'mild':
         return 'Excellent';
       case 'moderate':
@@ -1573,6 +1718,7 @@ class ResultsPage extends StatelessWidget {
     }
 
     final double defectivePct = resolvedPctValue.clamp(0.0, 100.0);
+    final bool hasDetectedDefects = totalDefects > 0 || detections.isNotEmpty;
 
     final String computedSeverity = _computeSeverityFromPercentage(defectivePct);
     final String? rawSeverity = summary?['severity'] as String? ?? (shelfLife?['severity'] as String?);
@@ -1586,8 +1732,15 @@ class ResultsPage extends StatelessWidget {
       severityLabel = computedRank > existingRank ? computedSeverity : normalizedSeverity;
     }
 
+    if (!hasDetectedDefects) {
+      severityLabel = 'normal';
+    }
+
     int severityLevel;
     switch (severityLabel.toLowerCase()) {
+      case 'normal':
+        severityLevel = 1;
+        break;
       case 'mild':
         severityLevel = 1;
         break;
@@ -1729,6 +1882,11 @@ class ResultsPage extends StatelessWidget {
         _normalizeSeverityTag(severity) ?? _computeSeverityFromPercentage(cappedPct);
     summary['severity'] = normalizedSeverity;
 
+    final int normalizedTotalDefects = _asInt(summary['total_defects']) ?? detections.length;
+    if (normalizedTotalDefects <= 0 && detections.isEmpty) {
+      summary['severity'] = 'normal';
+    }
+
     return summary;
   }
 
@@ -1802,6 +1960,22 @@ class ResultsPage extends StatelessWidget {
           'width': imageWidth,
           'height': imageHeight,
         };
+      } else {
+        // If detection doesn't have image dimensions, try to get from defectDetection map
+        final dynamic detectionMeta = defectDetection?['image_dimensions'] ?? defectDetection?['image_size'];
+        if (detectionMeta is Map) {
+          final dimsMap = Map<String, dynamic>.from(detectionMeta);
+          final double? metaWidth = _asDouble(dimsMap['width']);
+          final double? metaHeight = _asDouble(dimsMap['height']);
+          if (metaWidth != null && metaHeight != null && metaWidth > 0 && metaHeight > 0) {
+            normalized['image_width'] = metaWidth;
+            normalized['image_height'] = metaHeight;
+            normalized['image_size'] = {
+              'width': metaWidth,
+              'height': metaHeight,
+            };
+          }
+        }
       }
 
       return normalized;
@@ -2036,49 +2210,66 @@ class ResultsPage extends StatelessWidget {
     );
   }
 
-  Widget _buildYesNoButtons(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Row(
+  Widget _buildActionButtons(BuildContext context, ColorScheme colorScheme) {
+    final textColor = colorScheme.onSurface.withValues(alpha: 0.9);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Expanded(
-          child: ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(ResultsNavigationAction.scan),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: colorScheme.primary,
-              foregroundColor: colorScheme.onPrimary,
-              padding: const EdgeInsets.symmetric(vertical: AppConstants.mediumSpacing),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
-              ),
-            ),
-            child: const Text('Yes'),
+        Text(
+          'Scan another image?',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            color: textColor,
           ),
         ),
-        const SizedBox(width: AppConstants.mediumSpacing),
-        Expanded(
-          child: ElevatedButton(
-            onPressed: () => Navigator.of(context).pop(ResultsNavigationAction.history),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: colorScheme.surfaceContainerHighest,
-              foregroundColor: colorScheme.onSurface,
-              padding: const EdgeInsets.symmetric(vertical: AppConstants.mediumSpacing),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(AppConstants.mediumRadius),
+        const SizedBox(height: AppConstants.mediumSpacing),
+        Row(
+          children: [
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: () => Navigator.of(context).pop(ResultsNavigationAction.scan),
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(48),
+                  textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                icon: const Icon(Icons.camera_alt_outlined),
+                label: const Text('Yes'),
               ),
             ),
-            child: const Text('No'),
-          ),
+            const SizedBox(width: AppConstants.mediumSpacing),
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () => Navigator.of(context).pop(ResultsNavigationAction.history),
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(48),
+                  textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                child: const Text('No'),
+              ),
+            ),
+          ],
         ),
       ],
     );
   }
+
 }
 
 class DefectAnnotationPainter extends CustomPainter {
   final List<dynamic> detections;
   final Size? originalSize;
+  final Size? actualDisplayedSize; // Actual displayed image size (after EXIF)
+  final Size? imageDisplayedSize; // The calculated displayed image size (for coordinate matching)
+  final Offset imageOffset; // The offset where the image is positioned
   
-  DefectAnnotationPainter(this.detections, {this.originalSize});
+  DefectAnnotationPainter(
+    this.detections, {
+    this.originalSize,
+    this.actualDisplayedSize,
+    this.imageDisplayedSize,
+    Offset? imageOffset,
+  }) : imageOffset = imageOffset ?? Offset.zero;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -2095,35 +2286,154 @@ class DefectAnnotationPainter extends CustomPainter {
     );
 
     int validBoxesDrawn = 0;
-    
+    final List<Map<String, double>?> coordsByDetection =
+        List<Map<String, double>?>.filled(detections.length, null, growable: false);
     double minX = double.infinity;
     double minY = double.infinity;
-    for (final detection in detections) {
-      final coords = _resolveCoordinates(detection);
-      if (coords == null) continue;
-      minX = math.min(minX, math.min(coords['x1']!, coords['x2']!));
-      minY = math.min(minY, math.min(coords['y1']!, coords['y2']!));
+    double maxX = -double.infinity;
+    double maxY = -double.infinity;
+    bool hasAnyCoordinates = false;
+
+    for (int i = 0; i < detections.length; i++) {
+      final coords = _resolveCoordinates(detections[i]);
+      coordsByDetection[i] = coords;
+      if (coords == null) {
+        continue;
+      }
+      hasAnyCoordinates = true;
+      final double localMinX = math.min(coords['x1']!, coords['x2']!);
+      final double localMinY = math.min(coords['y1']!, coords['y2']!);
+      final double localMaxX = math.max(coords['x1']!, coords['x2']!);
+      final double localMaxY = math.max(coords['y1']!, coords['y2']!);
+      minX = math.min(minX, localMinX);
+      minY = math.min(minY, localMinY);
+      maxX = math.max(maxX, localMaxX);
+      maxY = math.max(maxY, localMaxY);
     }
+
+    if (!hasAnyCoordinates) {
+      _logResultsPage('No detections with valid coordinates available for painting');
+      return;
+    }
+
     if (!minX.isFinite) minX = 0;
     if (!minY.isFinite) minY = 0;
+    if (!maxX.isFinite) maxX = 0;
+    if (!maxY.isFinite) maxY = 0;
 
+    // Get original image dimensions from detections or originalSize parameter
     final bool hasOriginalSize = originalSize != null && originalSize!.width > 0 && originalSize!.height > 0;
+    final bool appearsNormalized = maxX <= 1.0 && maxY <= 1.0 && minX >= 0 && minY >= 0;
+
+    // Initialize with default values to ensure they're always assigned
+    double sourceWidth = 1.0;
+    double sourceHeight = 1.0;
+
     if (hasOriginalSize) {
-      minX = 0;
-      minY = 0;
+      sourceWidth = originalSize!.width;
+      sourceHeight = originalSize!.height;
+    } else if (appearsNormalized) {
+      sourceWidth = 1.0;
+      sourceHeight = 1.0;
+    } else {
+      // Try to get image dimensions from first detection
+      bool foundImageSize = false;
+      for (final detection in detections) {
+        if (detection is Map) {
+          final double? imgWidth = _parseDouble(detection['image_width'] ?? detection['imageWidth'] ?? (detection['image_size'] as Map?)?['width'] ?? (detection['imageSize'] as Map?)?['width']);
+          final double? imgHeight = _parseDouble(detection['image_height'] ?? detection['imageHeight'] ?? (detection['image_size'] as Map?)?['height'] ?? (detection['imageSize'] as Map?)?['height']);
+          if (imgWidth != null && imgHeight != null && imgWidth > 0 && imgHeight > 0) {
+            sourceWidth = imgWidth;
+            sourceHeight = imgHeight;
+            foundImageSize = true;
+            break;
+          }
+        }
+      }
+      if (!foundImageSize) {
+        // Fallback: use max coordinates as image size
+        sourceWidth = math.max(maxX - minX, 1.0);
+        sourceHeight = math.max(maxY - minY, 1.0);
+    }
     }
 
-    final Size sourceSize = hasOriginalSize
-        ? originalSize!
-        : _calculateDetectionBounds(detections, minX: minX, minY: minY);
-    final double scaleX = size.width / (sourceSize.width == 0 ? 1 : sourceSize.width);
-    final double scaleY = size.height / (sourceSize.height == 0 ? 1 : sourceSize.height);
+    // Ensure values are valid
+    if (sourceWidth <= 0) sourceWidth = 1.0;
+    if (sourceHeight <= 0) sourceHeight = 1.0;
+
+    // Check for EXIF orientation mismatch (dimensions swapped)
+    // If backend processed image as WxH but Flutter displays as HxW, we need to rotate coordinates
+    bool isRotated = false;
+    double effectiveSourceWidth = sourceWidth;
+    double effectiveSourceHeight = sourceHeight;
     
-    _logResultsPage('Detected source size: $sourceSize -> scaleX=$scaleX, scaleY=$scaleY');
+    if (actualDisplayedSize != null && hasOriginalSize) {
+      // Check if dimensions are swapped (indicates 90-degree rotation)
+      final bool widthSwapped = (sourceWidth - actualDisplayedSize!.height).abs() < 1.0;
+      final bool heightSwapped = (sourceHeight - actualDisplayedSize!.width).abs() < 1.0;
+      
+      if (widthSwapped && heightSwapped) {
+        isRotated = true;
+        // Use displayed dimensions for coordinate space (they match what Flutter shows)
+        effectiveSourceWidth = actualDisplayedSize!.width;
+        effectiveSourceHeight = actualDisplayedSize!.height;
+        debugPrint('[ResultsPage] EXIF rotation detected! Backend: ${sourceWidth}x${sourceHeight}, Displayed: ${actualDisplayedSize!.width}x${actualDisplayedSize!.height}. Rotating coordinates.');
+        debugPrint('[ResultsPage] Rotation details: widthSwapped=$widthSwapped, heightSwapped=$heightSwapped');
+      } else {
+        // No rotation - dimensions match
+        debugPrint('[ResultsPage] No rotation detected. Backend: ${sourceWidth}x${sourceHeight}, Displayed: ${actualDisplayedSize!.width}x${actualDisplayedSize!.height}');
+      }
+    }
+
+    // Use the provided imageDisplayedSize and imageOffset if available (from parent widget)
+    // This ensures we use the exact same calculations as the image positioning
+    double displayedWidth;
+    double displayedHeight;
+    double offsetX = 0.0;
+    double offsetY = 0.0;
+    
+    if (imageDisplayedSize != null) {
+      // Use the provided displayed size and offset (matches image widget positioning)
+      displayedWidth = imageDisplayedSize!.width;
+      displayedHeight = imageDisplayedSize!.height;
+      offsetX = imageOffset.dx;
+      offsetY = imageOffset.dy;
+      debugPrint('[ResultsPage] Using provided imageDisplayedSize: ${displayedWidth}x${displayedHeight}, offset: ($offsetX, $offsetY)');
+    } else {
+      // Fallback: Calculate the actual displayed image size considering BoxFit.contain
+      // Use effective dimensions (accounting for rotation) for aspect ratio calculation
+      final double imageAspectRatio = effectiveSourceWidth / effectiveSourceHeight;
+      final double containerAspectRatio = size.width / size.height;
+      
+      if (imageAspectRatio > containerAspectRatio) {
+        // Image is wider than container - fit to width
+        displayedWidth = size.width;
+        displayedHeight = size.width / imageAspectRatio;
+        offsetY = (size.height - displayedHeight) / 2.0; // Center vertically
+      } else {
+        // Image is taller than container - fit to height
+        displayedHeight = size.height;
+        displayedWidth = size.height * imageAspectRatio;
+        offsetX = (size.width - displayedWidth) / 2.0; // Center horizontally
+      }
+    }
+
+    // Calculate scale factors: from effective source image size to displayed image size
+    final double scaleX = displayedWidth / effectiveSourceWidth;
+    final double scaleY = displayedHeight / effectiveSourceHeight;
+
+    final logMsg = 'Coordinate scaling -> original:(${sourceWidth.toStringAsFixed(2)}, ${sourceHeight.toStringAsFixed(2)}) '
+      'effective:(${effectiveSourceWidth.toStringAsFixed(2)}, ${effectiveSourceHeight.toStringAsFixed(2)}) '
+      'displayed:(${displayedWidth.toStringAsFixed(2)}, ${displayedHeight.toStringAsFixed(2)}) '
+      'container:(${size.width.toStringAsFixed(2)}, ${size.height.toStringAsFixed(2)}) '
+      'offset:(${offsetX.toStringAsFixed(2)}, ${offsetY.toStringAsFixed(2)}) '
+      'scaleX=$scaleX scaleY=$scaleY isRotated=$isRotated';
+    _logResultsPage(logMsg);
+    debugPrint('[ResultsPage] $logMsg'); // Also print to terminal
 
     for (int i = 0; i < detections.length; i++) {
       final detection = detections[i];
-      final coords = _resolveCoordinates(detection);
+      final coords = coordsByDetection[i];
       if (coords == null) {
         _logResultsPage('Detection $i: No usable coordinates found');
         continue;
@@ -2147,27 +2457,74 @@ class DefectAnnotationPainter extends CustomPainter {
         continue;
       }
 
-      // Scale coordinates to match the display canvas size
-      final scaledX1 = (x1 - minX) * scaleX;
-      final scaledY1 = (y1 - minY) * scaleY;
-      final scaledX2 = (x2 - minX) * scaleX;
-      final scaledY2 = (y2 - minY) * scaleY;
+      // CRITICAL: Coordinates from backend are in backend's coordinate space
+      // We need to map them to the displayed image coordinate space
+      // If there's a rotation (dimensions swapped), we must transform coordinates
+      
+      double coordX1 = x1;
+      double coordY1 = y1;
+      double coordX2 = x2;
+      double coordY2 = y2;
+      double coordSourceWidth = sourceWidth;
+      double coordSourceHeight = sourceHeight;
+      
+      if (isRotated) {
+        // Backend processed as WxH (e.g., 640x480), Flutter displays as HxW (e.g., 480x640)
+        // Try 90° counter-clockwise rotation first (most common for EXIF): (x, y) -> (H - y, x)
+        final double backendH = sourceHeight;
+        
+        // Transform coordinates using counter-clockwise rotation
+        // Original: (x1,y1) to (x2,y2) in WxH space
+        // After 90° CCW: (H-y1,x1) to (H-y2,x2) in HxW space
+        final double ccwX1 = backendH - y2;
+        final double ccwX2 = backendH - y1;
+        final double ccwY1 = x1;
+        final double ccwY2 = x2;
+        
+        coordX1 = math.min(ccwX1, ccwX2);
+        coordX2 = math.max(ccwX1, ccwX2);
+        coordY1 = math.min(ccwY1, ccwY2);
+        coordY2 = math.max(ccwY1, ccwY2);
+        
+        // After rotation, coordinate space matches displayed dimensions (HxW)
+        coordSourceWidth = effectiveSourceWidth;
+        coordSourceHeight = effectiveSourceHeight;
+        
+        debugPrint('[ResultsPage] Detection $i rotated (CCW): backend=($x1,$y1,$x2,$y2) in ${sourceWidth}x${sourceHeight} -> '
+          'transformed=($coordX1,$coordY1,$coordX2,$coordY2) in ${coordSourceWidth}x${coordSourceHeight}');
+      }
+      
+      // Scale coordinates from coordinate source size to displayed image size
+      // Then add offset to account for centering (BoxFit.contain)
+      final double coordScaleX = displayedWidth / coordSourceWidth;
+      final double coordScaleY = displayedHeight / coordSourceHeight;
+      
+      final scaledX1 = (coordX1 * coordScaleX) + offsetX;
+      final scaledY1 = (coordY1 * coordScaleY) + offsetY;
+      final scaledX2 = (coordX2 * coordScaleX) + offsetX;
+      final scaledY2 = (coordY2 * coordScaleY) + offsetY;
+      
+      final scalingLogMsg = 'Detection $i scaling: original=($x1,$y1,$x2,$y2) '
+        'coordScale=($coordScaleX,$coordScaleY) offset=($offsetX,$offsetY) '
+        'scaled=($scaledX1,$scaledY1,$scaledX2,$scaledY2)';
+      _logResultsPage(scalingLogMsg);
+      debugPrint('[ResultsPage] $scalingLogMsg'); // Also print to terminal
       
       // Clamp scaled coordinates to canvas bounds
-      final finalX1 = scaledX1.clamp(0.0, size.width);
-      final finalY1 = scaledY1.clamp(0.0, size.height);
-      final finalX2 = scaledX2.clamp(0.0, size.width);
-      final finalY2 = scaledY2.clamp(0.0, size.height);
+      final clampedX1 = scaledX1.clamp(0.0, size.width);
+      final clampedY1 = scaledY1.clamp(0.0, size.height);
+      final clampedX2 = scaledX2.clamp(0.0, size.width);
+      final clampedY2 = scaledY2.clamp(0.0, size.height);
       
       // Check if bounding box is too small to be visible (after scaling)
-      final boxWidth = finalX2 - finalX1;
-      final boxHeight = finalY2 - finalY1;
+      final boxWidth = clampedX2 - clampedX1;
+      final boxHeight = clampedY2 - clampedY1;
       if (boxWidth < 1.5 || boxHeight < 1.5) {
         _logResultsPage('Detection $i: Bounding box very small after scaling ($boxWidth x $boxHeight), drawing indicator dot instead');
         final dotPaint = Paint()
           ..color = paint.color
           ..style = PaintingStyle.fill;
-        final dotCenter = Offset(finalX1.clamp(4.0, size.width - 4.0), finalY1.clamp(4.0, size.height - 4.0));
+        final dotCenter = Offset(clampedX1.clamp(4.0, size.width - 4.0), clampedY1.clamp(4.0, size.height - 4.0));
         canvas.drawCircle(dotCenter, 4, dotPaint);
 
         // Removed numeric badge near tiny detections to avoid duplication
@@ -2199,10 +2556,10 @@ class DefectAnnotationPainter extends CustomPainter {
         continue;
       }
       
-      _logResultsPage('Detection $i: Scaled from ($x1, $y1, $x2, $y2) to ($finalX1, $finalY1, $finalX2, $finalY2)');
+      _logResultsPage('Detection $i: Scaled from ($x1, $y1, $x2, $y2) to ($clampedX1, $clampedY1, $clampedX2, $clampedY2)');
 
       // Draw bounding box (outline only) using scaled coordinates
-      final rect = Rect.fromLTRB(finalX1, finalY1, finalX2, finalY2);
+      final rect = Rect.fromLTRB(clampedX1, clampedY1, clampedX2, clampedY2);
       canvas.drawRect(rect, paint);
       validBoxesDrawn++;
 
@@ -2222,8 +2579,8 @@ class DefectAnnotationPainter extends CustomPainter {
       textPainter.layout();
 
       final labelRect = Rect.fromLTWH(
-        finalX1, 
-        (finalY1 - textPainter.height - 4).clamp(0.0, size.height - textPainter.height - 4),
+        clampedX1, 
+        (clampedY1 - textPainter.height - 4).clamp(0.0, size.height - textPainter.height - 4),
         textPainter.width + 8,
         textPainter.height + 4,
       );
@@ -2234,7 +2591,22 @@ class DefectAnnotationPainter extends CustomPainter {
         ..style = PaintingStyle.fill;
 
       canvas.drawRect(labelRect, labelPaint);
-      textPainter.paint(canvas, Offset(finalX1 + 4, labelRect.top + 2));
+      textPainter.paint(canvas, Offset(clampedX1 + 4, labelRect.top + 2));
+    }
+
+    // If no coordinates were available but detections exist (e.g., classifier-only defects),
+    // draw a single red circle in the center of the displayed image to signal a defect.
+    if (!hasAnyCoordinates && detections.isNotEmpty) {
+      final Offset center = Offset(offsetX + displayedWidth / 2, offsetY + displayedHeight / 2);
+      final double radius = math.min(displayedWidth, displayedHeight) * 0.12;
+
+      final Paint circlePaint = Paint()
+        ..color = Colors.red
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3.0;
+
+      canvas.drawCircle(center, radius, circlePaint);
+      _logResultsPage('Fallback defect indicator drawn at center due to missing coordinates');
     }
     
     _logResultsPage('Valid bounding boxes drawn: $validBoxesDrawn out of ${detections.length} total detections');
@@ -2242,24 +2614,6 @@ class DefectAnnotationPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
-
-  static Size _calculateDetectionBounds(List<dynamic> detections, {double minX = 0, double minY = 0}) {
-    double maxX = 0;
-    double maxY = 0;
-    for (final detection in detections) {
-      final coords = _resolveCoordinates(detection);
-      if (coords == null) continue;
-      maxX = [maxX, coords['x1']!, coords['x2']!].reduce((a, b) => a > b ? a : b);
-      maxY = [maxY, coords['y1']!, coords['y2']!].reduce((a, b) => a > b ? a : b);
-    }
-    maxX = math.max(0, maxX - minX);
-    maxY = math.max(0, maxY - minY);
-    if (maxX <= 1.0 && maxY <= 1.0) {
-      // normalized coordinates (0-1). treat as normalized square.
-      return const Size(1, 1);
-    }
-    return Size(maxX, maxY);
-  }
 
   static Map<String, double>? _resolveCoordinates(dynamic detection) {
     if (detection is! Map) return null;
@@ -2349,8 +2703,6 @@ class DefectAnnotationPainter extends CustomPainter {
     return parsed;
   }
 }
-
-
 
 
 

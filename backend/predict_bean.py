@@ -31,8 +31,8 @@ def predict_bean_type(image_path, model_path='./models/cnn_best.pth'):
         predicted_class = torch.argmax(probabilities, dim=1).item()
         confidence = probabilities[0][predicted_class].item()
     
-    # Class names
-    class_names = ['Arabica', 'Robusta', 'Liberica', 'Excelsa']
+    # Class names (CoffeeNet order: Liberica, Arabica, Robusta, Excelsa)
+    class_names = ['Liberica', 'Arabica', 'Robusta', 'Excelsa']
     
     # Get all probabilities
     all_probs = {name: prob.item() for name, prob in zip(class_names, probabilities[0])}

@@ -7,8 +7,6 @@ import '../utils/api_service.dart';
 import '../utils/local_history_store.dart';
 import 'results_page.dart';
 
-enum HistoryFilterOption { all, offline, needsAttention }
-
 class HistoryPageController {
   _HistoryPageState? _state;
 
@@ -42,9 +40,7 @@ class HistoryPage extends StatefulWidget {
 
 class _HistoryPageState extends State<HistoryPage> {
   List<dynamic> _items = [];
-  List<dynamic> _filteredItems = [];
   bool _loading = true;
-  HistoryFilterOption _activeFilter = HistoryFilterOption.all;
 
   static const Color _lightBackground = Color(0xFFF0F0F0);
   static const Color _lightCard = Color(0xFFF1E7D2);
@@ -138,7 +134,6 @@ class _HistoryPageState extends State<HistoryPage> {
     setState(() {
       _items = combined;
       _loading = false;
-      _filteredItems = _computeFilteredItems();
     });
   }
 
@@ -158,7 +153,7 @@ class _HistoryPageState extends State<HistoryPage> {
       color: pageBackground,
       child: Column(
         children: [
-          _buildHeader(headerTextColor, pageBackground, isDark),
+          _buildHeader(headerTextColor, pageBackground),
           _buildContent(
             context,
             colorScheme,
@@ -174,7 +169,7 @@ class _HistoryPageState extends State<HistoryPage> {
     );
   }
 
-  Widget _buildHeader(Color titleColor, Color background, bool isDark) {
+  Widget _buildHeader(Color titleColor, Color background) {
     return Container(
       width: double.infinity,
       color: background,
@@ -199,55 +194,7 @@ class _HistoryPageState extends State<HistoryPage> {
                   ),
                 ),
               ),
-              _buildHeaderAction(isDark),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildHeaderAction(bool isDark) {
-    final Color chipBackground =
-        (isDark ? _darkIconBackground : _lightIconBackground).withValues(
-          alpha: isDark ? 0.65 : 0.85,
-        );
-    final Color borderColor = isDark
-        ? _darkBorder.withValues(alpha: 0.6)
-        : _lightBorder;
-    final Color textColor = isDark ? Colors.white : _lightHeaderText;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: _openFilterSheet,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: chipBackground,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: borderColor,
-              width: AppConstants.thinBorder,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.filter_list,
-                size: 18,
-                color: textColor.withValues(alpha: 0.85),
-              ),
-              const SizedBox(width: 6),
-              Text(
-                _filterLabel(_activeFilter),
-                style: TextStyle(
-                  color: textColor,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+              const SizedBox(width: 36),
             ],
           ),
         ),
@@ -279,7 +226,7 @@ class _HistoryPageState extends State<HistoryPage> {
               )
             : RefreshIndicator(
                 onRefresh: () => _loadHistory(showLoadingIndicator: true),
-                child: _filteredItems.isEmpty
+                child: _items.isEmpty
                     ? LayoutBuilder(
                         builder: (context, constraints) {
                           return ListView(
@@ -332,7 +279,7 @@ class _HistoryPageState extends State<HistoryPage> {
                         itemBuilder: (_, index) => _historyTile(
                           context,
                           colorScheme,
-                          _filteredItems[index],
+                          _items[index],
                           cardBackground,
                           borderColor,
                           headerTextColor,
@@ -341,7 +288,7 @@ class _HistoryPageState extends State<HistoryPage> {
                         ),
                         separatorBuilder: (_, __) =>
                             const SizedBox(height: AppConstants.mediumSpacing),
-                        itemCount: _filteredItems.length,
+                        itemCount: _items.length,
                       ),
               ),
       ),
@@ -373,8 +320,9 @@ class _HistoryPageState extends State<HistoryPage> {
 
     return InkWell(
       onTap: () async {
-        final historyId = item['history_id'];
-        final localData = item['local_data'] as Map<String, dynamic>?;
+        try {
+          final historyId = item['history_id'];
+          final localData = item['local_data'] as Map<String, dynamic>?;
 
         if (historyId == null && localData != null) {
           final predictionMap =
@@ -429,6 +377,21 @@ class _HistoryPageState extends State<HistoryPage> {
               fallbackPercentage: fallbackDefectivePct,
             );
             localDefectDetection['summary'] = summary;
+            
+            // Ensure image_dimensions is preserved for proper defect annotation scaling
+            final dynamic existingDims = localDefectDetection['image_dimensions'] ?? localDefectDetection['image_size'];
+            if (existingDims is Map) {
+              final dimsMap = Map<String, dynamic>.from(existingDims);
+              final double? existingWidth = _asDouble(dimsMap['width']);
+              final double? existingHeight = _asDouble(dimsMap['height']);
+              if (existingWidth != null && existingHeight != null && existingWidth > 0 && existingHeight > 0) {
+                // Already has valid dimensions, keep them
+                localDefectDetection['image_dimensions'] = {
+                  'width': existingWidth,
+                  'height': existingHeight,
+                };
+              }
+            }
           } else {
             _ensureSeverityConsistency(
               summary: null,
@@ -444,14 +407,13 @@ class _HistoryPageState extends State<HistoryPage> {
           final navigator = Navigator.of(context);
           await navigator.push(
             MaterialPageRoute(
-              builder: (_) => ResultsPage(
+              builder: (_) => ResultsPage.history(
                 prediction: prediction,
                 imagePath:
                     (localData['image_path'] ?? item['image_url'] ?? '')
                         as String,
                 defectDetection: localDefectDetection,
                 shelfLife: localShelfLife,
-                shouldAutoSave: false,
               ),
             ),
           );
@@ -487,49 +449,86 @@ class _HistoryPageState extends State<HistoryPage> {
 
         final double? historyDefectivePct =
             _asDouble(historyData?['defective_percent']);
-        final double? listDefectivePct = _deriveDefectPercentage(item);
-        final double? effectiveDefectivePct =
+        final double listDefectivePct = _deriveDefectPercentage(item);
+        final double effectiveDefectivePct =
             historyDefectivePct ?? listDefectivePct;
-        if (effectiveDefectivePct != null) {
-          shelfLifeData ??= <String, dynamic>{};
-          shelfLifeData.putIfAbsent(
-            'defect_percentage',
-            () => effectiveDefectivePct,
-          );
-          shelfLifeData.putIfAbsent(
-            'defective_percent',
-            () => effectiveDefectivePct,
-          );
-        }
+        final Map<String, dynamic> shelfLifeMap =
+            shelfLifeData ??= <String, dynamic>{};
+        shelfLifeMap.putIfAbsent(
+          'defect_percentage',
+          () => effectiveDefectivePct,
+        );
+        shelfLifeMap.putIfAbsent(
+          'defective_percent',
+          () => effectiveDefectivePct,
+        );
 
         if (defectDetection != null) {
           final summary =
               _cloneMap(defectDetection['summary']) ?? <String, dynamic>{};
           double? summaryPct = _asDouble(summary['defect_percentage']);
-          if (effectiveDefectivePct != null &&
-              (summaryPct == null ||
-                  (summaryPct == 0 && effectiveDefectivePct > 0))) {
+          if (summaryPct == null ||
+              (summaryPct == 0 && effectiveDefectivePct > 0)) {
             summary['defect_percentage'] = effectiveDefectivePct;
             summaryPct = effectiveDefectivePct;
           }
 
-          final dynamic severitySource =
-              shelfLifeData?['severity'] ??
-              shelfLifeData?['category'] ??
+          final dynamic severitySourceRaw =
+              shelfLifeMap['severity'] ??
+              shelfLifeMap['category'] ??
               historyData?['severity'];
-          if ((summary['severity'] == null ||
-                  (summary['severity'] as String?)?.isEmpty == true) &&
-              severitySource is String &&
-              severitySource.isNotEmpty) {
-            summary['severity'] = severitySource;
+          final String? incomingSeverity = severitySourceRaw is String
+              ? severitySourceRaw.trim()
+              : null;
+          final String? existingSeverity =
+              (summary['severity'] as String?)?.trim();
+          if ((existingSeverity == null || existingSeverity.isEmpty) &&
+              incomingSeverity != null &&
+              incomingSeverity.isNotEmpty) {
+            summary['severity'] = incomingSeverity;
           }
 
           _ensureSeverityConsistency(
             summary: summary,
             shelfLifeData: shelfLifeData,
-            fallbackPercentage: summaryPct ?? effectiveDefectivePct,
+            fallbackPercentage: summaryPct,
           );
           defectDetection['summary'] = summary;
+          
+          // Ensure image_dimensions is preserved for proper defect annotation scaling
+          // First check if it's already in defectDetection
+          final dynamic existingDims = defectDetection['image_dimensions'] ?? defectDetection['image_size'];
+          if (existingDims is Map) {
+            final dimsMap = Map<String, dynamic>.from(existingDims);
+            final double? existingWidth = _asDouble(dimsMap['width']);
+            final double? existingHeight = _asDouble(dimsMap['height']);
+            if (existingWidth != null && existingHeight != null && existingWidth > 0 && existingHeight > 0) {
+              // Already has valid dimensions, keep them
+              defectDetection['image_dimensions'] = {
+                'width': existingWidth,
+                'height': existingHeight,
+              };
+            }
+          } else {
+            // Try to get from image data
+            try {
+              final dynamic imageData = data?['image'];
+              if (imageData is Map) {
+                final imageMap = Map<String, dynamic>.from(imageData);
+                final double? imageWidth = _asDouble(imageMap['width'] ?? imageMap['image_width']);
+                final double? imageHeight = _asDouble(imageMap['height'] ?? imageMap['image_height']);
+                if (imageWidth != null && imageHeight != null && imageWidth > 0 && imageHeight > 0) {
+                  defectDetection['image_dimensions'] = {
+                    'width': imageWidth,
+                    'height': imageHeight,
+                  };
+                }
+              }
+            } catch (e) {
+              // If image data is not available, continue without image_dimensions
+              debugPrint('Could not extract image dimensions from history data: $e');
+            }
+          }
         } else {
           _ensureSeverityConsistency(
             summary: null,
@@ -538,26 +537,32 @@ class _HistoryPageState extends State<HistoryPage> {
           );
         }
 
-        if (!mounted) {
+        if (!mounted || !context.mounted) {
           return;
         }
-
-        if (!context.mounted) {
-          return;
-        }
-
         final navigator = Navigator.of(context);
         await navigator.push(
           MaterialPageRoute(
-            builder: (_) => ResultsPage(
+            builder: (_) => ResultsPage.history(
               prediction: prediction,
               imagePath: (data['image']?['image_url'] ?? '') as String,
               defectDetection: defectDetection,
               shelfLife: shelfLifeData,
-              shouldAutoSave: false,
             ),
           ),
         );
+        } catch (e, stackTrace) {
+          debugPrint('Error opening history item: $e');
+          debugPrint('Stack trace: $stackTrace');
+          if (mounted && context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Error opening history: ${e.toString()}'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
       },
       child: Container(
         decoration: BoxDecoration(
@@ -630,104 +635,6 @@ class _HistoryPageState extends State<HistoryPage> {
     );
   }
 
-  Future<void> _openFilterSheet() async {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-    final selected = await showModalBottomSheet<HistoryFilterOption>(
-      context: context,
-      backgroundColor: colorScheme.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 16),
-            Text(
-              'Filter History',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w700,
-                color: colorScheme.primary,
-              ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.list_alt),
-              title: const Text('All Scans'),
-              trailing: _activeFilter == HistoryFilterOption.all
-                  ? Icon(Icons.check, color: colorScheme.primary)
-                  : null,
-              onTap: () => Navigator.of(context).pop(HistoryFilterOption.all),
-            ),
-            ListTile(
-              leading: const Icon(Icons.offline_pin),
-              title: const Text('Saved Offline'),
-              trailing: _activeFilter == HistoryFilterOption.offline
-                  ? Icon(Icons.check, color: colorScheme.primary)
-                  : null,
-              onTap: () =>
-                  Navigator.of(context).pop(HistoryFilterOption.offline),
-            ),
-            ListTile(
-              leading: const Icon(Icons.error_outline),
-              title: const Text('Needs Attention'),
-              subtitle: const Text('Defects above 35%'),
-              trailing: _activeFilter == HistoryFilterOption.needsAttention
-                  ? Icon(Icons.check, color: colorScheme.primary)
-                  : null,
-              onTap: () =>
-                  Navigator.of(context).pop(HistoryFilterOption.needsAttention),
-            ),
-            const SizedBox(height: 12),
-          ],
-        ),
-      ),
-    );
-
-    if (selected != null && selected != _activeFilter) {
-      setState(() {
-        _activeFilter = selected;
-        _applyFilter();
-      });
-    }
-  }
-
-  String _filterLabel(HistoryFilterOption option) {
-    switch (option) {
-      case HistoryFilterOption.offline:
-        return 'Offline';
-      case HistoryFilterOption.needsAttention:
-        return 'Attention';
-      default:
-        return 'All';
-    }
-  }
-
-  void _applyFilter() {
-    setState(() {
-      _filteredItems = _computeFilteredItems();
-    });
-  }
-
-  List<dynamic> _computeFilteredItems() {
-    List<dynamic> base = List<dynamic>.from(_items);
-    switch (_activeFilter) {
-      case HistoryFilterOption.offline:
-        base = base.where((item) => item['history_id'] == null).toList();
-        break;
-      case HistoryFilterOption.needsAttention:
-        base = base.where((item) {
-          final double? defective = _asDouble(item['defective_percent']);
-          return defective != null && defective >= 35.0;
-        }).toList();
-        break;
-      case HistoryFilterOption.all:
-        break;
-    }
-    return base;
-  }
-
   Map<String, dynamic>? _cloneMap(dynamic value) {
     if (value is Map) {
       return Map<String, dynamic>.from(value);
@@ -790,37 +697,55 @@ class _HistoryPageState extends State<HistoryPage> {
 
   String? _normalizeSeverity(String? severity, {double? fallbackPercentage}) {
     final trimmed = severity?.trim();
+    String? normalized;
     if (trimmed != null && trimmed.isNotEmpty) {
       final lower = trimmed.toLowerCase();
       switch (lower) {
+        case 'normal':
+          normalized = 'normal';
+          break;
         case 'mild':
         case 'moderate':
         case 'severe':
-          return lower;
+          normalized = lower;
+          break;
         case 'excellent':
         case 'good':
         case 'optimal':
         case 'great':
         case 'low':
-          return 'mild';
+          normalized = 'mild';
+          break;
         case 'warning':
         case 'fair':
         case 'medium':
-          return 'moderate';
+          normalized = 'moderate';
+          break;
         case 'critical':
         case 'expired':
         case 'poor':
         case 'high':
-          return 'severe';
+          normalized = 'severe';
+          break;
         default:
-          return lower;
+          normalized = lower;
+          break;
       }
     }
 
-    if (fallbackPercentage != null) {
-      return _severityFromPercentage(fallbackPercentage);
+    final String? fallbackNormalized =
+        fallbackPercentage != null ? _severityFromPercentage(fallbackPercentage) : null;
+
+    if (normalized == null || normalized.isEmpty) {
+      return fallbackNormalized;
     }
-    return null;
+
+    if (fallbackNormalized != null &&
+        _severityRank(fallbackNormalized) > _severityRank(normalized)) {
+      return fallbackNormalized;
+    }
+
+    return normalized;
   }
 
   String _formatHistoryTimestamp(dynamic value) {
@@ -856,7 +781,8 @@ class _HistoryPageState extends State<HistoryPage> {
         _asDouble(item['predicted_months']) ??
         _asDouble(item['estimated_months']);
 
-    final Map<String, dynamic>? shelfLifeMap = _cloneMap(item['shelf_life']);
+    final Map<String, dynamic>? shelfLifeMap =
+        _deriveShelfLifeMap(Map<String, dynamic>.from(item));
     months ??=
         _asDouble(shelfLifeMap?['predicted_months']) ??
         _asDouble(shelfLifeMap?['estimated_months']);
@@ -867,6 +793,7 @@ class _HistoryPageState extends State<HistoryPage> {
 
     final double? days =
         _asDouble(shelfLifeMap?['predicted_days']) ??
+        _asDouble(shelfLifeMap?['raw_prediction']) ??
         _asDouble(item['predicted_days']);
     if (days != null && !days.isNaN && days > 0) {
       return days / 30.0;
@@ -1102,8 +1029,23 @@ class _HistoryPageState extends State<HistoryPage> {
     return estimated.clamp(24.0, 95.0);
   }
 
+  int _severityRank(String? severity) {
+    switch (severity) {
+      case 'normal':
+        return 0;
+      case 'mild':
+        return 1;
+      case 'moderate':
+        return 2;
+      case 'severe':
+        return 3;
+      default:
+        return 0;
+    }
+  }
+
   String _severityFromPercentage(double percentage) {
-    if (percentage < 32) return 'mild';
+    if (percentage < 22) return 'mild';
     if (percentage < 78) return 'moderate';
     return 'severe';
   }

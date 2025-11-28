@@ -74,6 +74,12 @@ async def scan_bean_image(
             if defect_detector is not None:
                 try:
                     defect_result = defect_detector.detect_defects(temp_path)
+                    logger.info(
+                        "Defect detector success=%s total=%s types=%s",
+                        defect_result.get("success"),
+                        (defect_result.get("summary") or {}).get("total_defects"),
+                        (defect_result.get("summary") or {}).get("defect_types"),
+                    )
                 except Exception as e:
                     logger.error(f"Defect detection failed: {e}")
                     defect_result = {
@@ -330,6 +336,12 @@ async def detect_defects_only(
             # Detect defects
             if defect_detector is not None:
                 defect_result = defect_detector.detect_defects(temp_path, confidence_threshold)
+                logger.info(
+                    "[detect_defects_only] success=%s total=%s types=%s",
+                    defect_result.get("success"),
+                    (defect_result.get("summary") or {}).get("total_defects"),
+                    (defect_result.get("summary") or {}).get("defect_types"),
+                )
             else:
                 defect_result = {
                     'success': False,

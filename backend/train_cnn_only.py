@@ -1,3 +1,4 @@
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -5,9 +6,10 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 import numpy as np
 import os
+from pathlib import Path
 from PIL import Image
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn.metrics import confusion_matrix, classification_report
@@ -19,27 +21,53 @@ from ml.custom_models import BeanClassifierCNN
 
 class BeanImageDataset(Dataset):
     """Dataset for bean images with labels"""
-    
-    def __init__(self, data_dir: str, transform=None, split: str = 'train'):
+
+    def __init__(
+        self,
+        data_dir: str,
+        transform=None,
+        split: str = 'train',
+        target_classes: Optional[List[str]] = None,
+    ):
         self.data_dir = data_dir
         self.transform = transform
         self.split = split
-        
+        # Define which bean types to keep; default to all original classes
+        default_classes = ["Arabica", "Robusta", "Liberica", "Excelsa"]
+        if target_classes is not None:
+            if len(target_classes) == 0:
+                raise ValueError("target_classes must contain at least one class")
+            self.bean_types = target_classes
+        else:
+            self.bean_types = default_classes
+        self.class_to_idx = {bean: idx for idx, bean in enumerate(self.bean_types)}
+
         # Load annotations
         self.annotations = self._load_annotations()
-        
+        if self.bean_types:
+            filtered_annotations = [
+                ann for ann in self.annotations if ann.get('bean_type') in self.class_to_idx
+            ]
+            dropped = len(self.annotations) - len(filtered_annotations)
+            if dropped > 0:
+                print(
+                    f"ℹ️ Filtered out {dropped} annotation(s) not in target classes "
+                    f"{self.bean_types} for split '{self.split}'"
+                )
+            self.annotations = filtered_annotations
+
         # Pre-compute class weights if training split (for imbalance handling)
         self.class_weights = None
         if split == 'train' and len(self.annotations) > 0:
-            bean_types = ["Arabica", "Robusta", "Liberica", "Excelsa"]
-            counts = {bt: 0 for bt in bean_types}
+            counts = {bt: 0 for bt in self.bean_types}
             for ann in self.annotations:
-                if ann.get('bean_type') in counts:
-                    counts[ann['bean_type']] += 1
+                bean_type = ann.get('bean_type')
+                if bean_type in counts:
+                    counts[bean_type] += 1
             totals = sum(counts.values())
             # Inverse frequency weights normalized
             weights = []
-            for bt in bean_types:
+            for bt in self.bean_types:
                 freq = counts[bt] / totals if totals > 0 else 0
                 weights.append(0.0 if freq == 0 else 1.0 / freq)
             # Normalize to mean 1.0 for stability
@@ -95,7 +123,7 @@ class BeanImageDataset(Dataset):
     
     def __getitem__(self, idx):
         annotation = self.annotations[idx]
-        
+
         # Load image
         image_path = os.path.join(self.data_dir, 'images', annotation['image_id'])
         if os.path.exists(image_path):
@@ -115,26 +143,32 @@ class BeanImageDataset(Dataset):
         return {
             'image': image,
             'bean_type_label': bean_type_label,
-            'health_score': annotation['health_score'],
+            'bean_type': annotation['bean_type'],
+            'health_score': annotation.get('health_score', 0.0),
             'image_id': annotation['image_id']
         }
     
     def _get_bean_type_label(self, bean_type: str):
         """Convert bean type to label index"""
-        bean_types = ["Arabica", "Robusta", "Liberica", "Excelsa"]
-        return bean_types.index(bean_type) if bean_type in bean_types else 0
+        return self.class_to_idx.get(bean_type, 0)
 
 class CNNTrainer:
     """Trainer class for CNN classifier only"""
     
-    def __init__(self, device: str = 'cpu', models_dir: str = './models'):
+    def __init__(
+        self,
+        device: str = 'cpu',
+        models_dir: str = './models',
+        class_names: Optional[List[str]] = None,
+    ):
         self.device = torch.device(device)
         self.non_blocking = self.device.type == 'cuda'
         self.models_dir = models_dir
         os.makedirs(models_dir, exist_ok=True)
-        
+        self.class_names = class_names or ["Arabica", "Robusta", "Liberica", "Excelsa"]
+
         # Initialize CNN model
-        self.model = BeanClassifierCNN(num_classes=4).to(self.device)
+        self.model = BeanClassifierCNN(class_names=self.class_names).to(self.device)
         
         # Training parameters
         self.learning_rate = 0.0005
@@ -267,10 +301,18 @@ class CNNTrainer:
                 self.training_history['val_acc'].append(val_acc)
                 
                 # Calculate confusion matrix and class report
-                cm = confusion_matrix(labels, predictions)
-                class_report = classification_report(labels, predictions, 
-                                                   target_names=['Arabica', 'Robusta', 'Liberica', 'Excelsa'],
-                                                   output_dict=True)
+                cm = confusion_matrix(
+                    labels,
+                    predictions,
+                    labels=list(range(len(self.class_names)))
+                )
+                class_report = classification_report(
+                    labels,
+                    predictions,
+                    target_names=self.class_names,
+                    output_dict=True,
+                    zero_division=0
+                )
                 
                 self.training_history['confusion_matrices'].append(cm)
                 self.training_history['class_reports'].append(class_report)
@@ -278,10 +320,9 @@ class CNNTrainer:
                 print(f"🎯 Val   - Loss: {val_loss:.4f}, Accuracy: {val_acc:.2f}%")
                 
                 # Print per-class accuracy
-                bean_types = ['Arabica', 'Robusta', 'Liberica', 'Excelsa']
                 print("📊 Per-class accuracy:")
-                for i, bean_type in enumerate(bean_types):
-                    if i < len(class_report):
+                for i, bean_type in enumerate(self.class_names):
+                    if bean_type in class_report:
                         precision = class_report[bean_type]['precision']
                         recall = class_report[bean_type]['recall']
                         f1 = class_report[bean_type]['f1-score']
@@ -360,8 +401,7 @@ class CNNTrainer:
         # Confusion matrix (latest)
         if self.training_history['confusion_matrices']:
             cm = self.training_history['confusion_matrices'][-1]
-            bean_types = ['Arabica', 'Robusta', 'Liberica', 'Excelsa']
-            
+            bean_types = self.class_names
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
                        xticklabels=bean_types, yticklabels=bean_types, ax=axes[1, 0])
             axes[1, 0].set_title('Confusion Matrix (Latest Epoch)')
@@ -370,7 +410,7 @@ class CNNTrainer:
         
         # Per-class F1 scores over time
         if self.training_history['class_reports']:
-            bean_types = ['Arabica', 'Robusta', 'Liberica', 'Excelsa']
+            bean_types = self.class_names
             f1_scores = {bean: [] for bean in bean_types}
             
             for report in self.training_history['class_reports']:
@@ -422,7 +462,7 @@ class CNNTrainer:
 
 def analyze_dataset_distribution(dataset, name):
     """Analyze class distribution in dataset"""
-    bean_types = ["Arabica", "Robusta", "Liberica", "Excelsa"]
+    bean_types = getattr(dataset, 'bean_types', ["Arabica", "Robusta", "Liberica", "Excelsa"])
     class_counts = {bean: 0 for bean in bean_types}
     
     for i in range(len(dataset)):
@@ -447,10 +487,13 @@ def main():
     # Check if CUDA is available
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"🖥️ Using device: {device}")
+
+    target_classes = ["Liberica", "Excelsa"]
+    print(f"🎯 Target bean types: {target_classes}")
     
     # Create datasets
-    train_dataset = BeanImageDataset('./data/train', split='train')
-    val_dataset = BeanImageDataset('./data/val', split='val')
+    train_dataset = BeanImageDataset('./data/train', split='train', target_classes=target_classes)
+    val_dataset = BeanImageDataset('./data/val', split='val', target_classes=target_classes)
     
     print(f"📊 Dataset sizes: Train={len(train_dataset)}, Val={len(val_dataset)}")
     
@@ -477,11 +520,11 @@ def main():
             print(f"   ✅ {bean_type}: Train={train_pct:.1f}%, Val={val_pct:.1f}%")
     
     # Initialize trainer
-    trainer = CNNTrainer(device=device)
+    trainer = CNNTrainer(device=device, class_names=target_classes)
     
     # Optionally set class-weighted loss to handle imbalance
     try:
-        bean_types_order = ["Arabica", "Robusta", "Liberica", "Excelsa"]
+        bean_types_order = trainer.class_names
         counts_list = [train_dist.get(bt, 0) for bt in bean_types_order]
         total_count = sum(counts_list)
         inv_freq = []

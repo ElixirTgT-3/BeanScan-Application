@@ -265,6 +265,6 @@ CREATE TABLE shelf_life_predictions (
 );
 ```
 
-## Conclusion
+## Conclusion  
 
 The rule-based shelf life prediction algorithm provides a robust, interpretable, and efficient alternative to machine learning approaches. By leveraging domain knowledge and explicit decision rules, the system delivers reliable predictions while maintaining transparency and computational efficiency. The methodology is well-suited for production environments where explainability and performance are critical requirements.

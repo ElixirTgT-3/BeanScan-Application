@@ -30,12 +30,58 @@ class BeanPrediction {
   });
 
   factory BeanPrediction.fromJson(Map<String, dynamic> json) {
+    final dynamic rawPrediction = json['prediction'] ??
+        json['predicted_class'] ??
+        json['class'] ??
+        json['bean_type'] ??
+        json['bean_type_name'];
+
+    final double confidence = (() {
+      final dynamic raw = json['confidence'] ??
+          json['confidence_score'] ??
+          json['probability'];
+      return (raw is num) ? raw.toDouble() : 0.0;
+    })();
+
+    final Map<String, double> probabilityMap = <String, double>{};
+    final dynamic rawProbabilities =
+        json['all_probabilities'] ?? json['probabilities'];
+
+    if (rawProbabilities is Map) {
+      rawProbabilities.forEach((key, value) {
+        if (value is num) {
+          probabilityMap[key.toString()] = value.toDouble();
+        }
+      });
+    } else if (rawProbabilities is List) {
+      const List<String> defaultClasses = <String>[
+        'Arabica',
+        'Robusta',
+        'Liberica',
+        'Excelsa',
+      ];
+      final List<dynamic>? providedClasses = json['classes'] is List
+          ? (json['classes'] as List).cast<dynamic>()
+          : null;
+      for (int i = 0; i < rawProbabilities.length; i++) {
+        final dynamic value = rawProbabilities[i];
+        if (value is! num) continue;
+        final String label;
+        if (providedClasses != null && i < providedClasses.length) {
+          label = providedClasses[i]?.toString() ?? 'Class_$i';
+        } else if (i < defaultClasses.length) {
+          label = defaultClasses[i];
+        } else {
+          label = 'Class_$i';
+        }
+        probabilityMap[label] = value.toDouble();
+      }
+    }
+
     return BeanPrediction(
-      prediction: json['prediction'] ?? '',
-      confidence: (json['confidence'] ?? 0.0).toDouble(),
-      allProbabilities: Map<String, double>.from(
-        json['all_probabilities'] ?? {},
-      ),
+      prediction: rawPrediction?.toString() ?? '',
+      confidence: confidence,
+      allProbabilities: probabilityMap,
     );
   }
 }
@@ -176,47 +222,69 @@ class ApiService {
   static String? _resolvedApiUrl;
   static String get apiUrl {
     if (_resolvedApiUrl != null) return _resolvedApiUrl!;
-    if (Platform.isAndroid) return androidBaseUrl;
-    return baseUrl;
+    final url = Platform.isAndroid ? androidBaseUrl : baseUrl;
+    // Log the URL being used (only once)
+    if (_resolvedApiUrl == null) {
+      _logApiService('Using API URL: $url (Platform: ${Platform.isAndroid ? "Android" : "Other"})');
+      _logApiService('baseUrl from env: $baseUrl');
+      if (Platform.isAndroid) {
+        _logApiService('androidBaseUrl from env: $androidBaseUrl');
+      }
+    }
+    return url;
   }
 
   /// Check if the API is healthy
   static Future<bool> checkHealth() async {
+    // Always prioritize the dart-define URL first
+    final primaryUrl = apiUrl;
+    _logApiService('Health check starting with primary URL: $primaryUrl');
+    _logApiService('baseUrl: $baseUrl, androidBaseUrl: $androidBaseUrl');
+    
     final candidates = <String>[
-      apiUrl,
+      primaryUrl, // Try dart-define URL first
       if (Platform.isAndroid) ...[
-        // Android emulator default host mapping
-        'http://10.0.2.2:8000',
+        // Android emulator default host mapping (only if not using dart-define)
+        if (!primaryUrl.contains('192.168') && !primaryUrl.contains('10.0.2.2'))
+          'http://10.0.2.2:8000',
         // Genymotion emulator
-        'http://10.0.3.2:8000',
+        if (!primaryUrl.contains('192.168') && !primaryUrl.contains('10.0.3.2'))
+          'http://10.0.3.2:8000',
       ],
-      // Common local fallbacks
-      'http://localhost:8000',
-      'http://127.0.0.1:8000',
+      // Common local fallbacks (only if not using dart-define)
+      if (!primaryUrl.contains('localhost') && !primaryUrl.contains('127.0.0.1')) ...[
+        'http://localhost:8000',
+        'http://127.0.0.1:8000',
+      ],
     ];
 
     for (final url in candidates) {
       try {
+        _logApiService('Trying health check: $url');
         final response = await http.get(
           Uri.parse('$url/health'),
           headers: {'Content-Type': 'application/json'},
-        ).timeout(const Duration(seconds: 3));
+        ).timeout(const Duration(seconds: 5));
         if (response.statusCode == 200) {
           _resolvedApiUrl = url;
-          if (url != apiUrl) {
-            _logApiService('API reachable at: $url (selected)');
+          _logApiService('✓ API reachable at: $url');
+          if (url != primaryUrl) {
+            _logApiService('⚠ Using fallback URL instead of dart-define URL');
           }
           return true;
+        } else {
+          _logApiService('Health check returned status ${response.statusCode} for $url');
         }
       } catch (e, stackTrace) {
         // Try next candidate
         _logApiService(
-          'Health check failed for $url',
+          '✗ Health check failed for $url',
           error: e,
           stackTrace: stackTrace,
         );
       }
     }
+    _logApiService('✗ All health check candidates failed');
     return false;
   }
 
