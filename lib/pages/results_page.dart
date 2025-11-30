@@ -1801,7 +1801,7 @@ class ResultsPage extends StatelessWidget {
     final double? shelfLifePct =
         _asDouble(shelfLifeData?['defect_percentage'] ?? shelfLifeData?['defective_percent']);
 
-    final detections = _getDetections();
+    final detections = _getDetectionsForSummary();
     if (!summary.containsKey('total_defects') ||
         summary['total_defects'] == null ||
         (_asInt(summary['total_defects']) ?? 0) == 0 && detections.isNotEmpty) {
@@ -1892,7 +1892,18 @@ class ResultsPage extends StatelessWidget {
 
   List<dynamic> _getDetections() {
     if (defectDetection == null) return const [];
+    final dynamic preferredList =
+        defectDetection?['detections_all'] ?? defectDetection?['detections'];
+    return _normalizeDetectionList(preferredList ?? defectDetection);
+  }
 
+  List<dynamic> _getDetectionsForSummary() {
+    if (defectDetection == null) return const [];
+    final dynamic filteredList = defectDetection?['detections'];
+    return _normalizeDetectionList(filteredList ?? defectDetection);
+  }
+
+  List<Map<String, dynamic>> _normalizeDetectionList(dynamic listData) {
     Map<String, dynamic>? normalize(dynamic raw) {
       if (raw is! Map) return null;
       final source = Map<String, dynamic>.from(raw);
@@ -1981,13 +1992,12 @@ class ResultsPage extends StatelessWidget {
       return normalized;
     }
 
-    if (defectDetection!['detections'] is List) {
-      final rawList = defectDetection!['detections'] as List;
-      return rawList.map<Map<String, dynamic>?>(normalize).whereType<Map<String, dynamic>>().toList();
+    if (listData is List) {
+      return listData.map<Map<String, dynamic>?>(normalize).whereType<Map<String, dynamic>>().toList();
     }
 
     final Map<String, dynamic>? single = normalize(defectDetection!);
-    return single == null ? const [] : [single];
+    return single == null ? <Map<String, dynamic>>[] : [single];
   }
 
   Map<String, dynamic>? _extractCoordinateMap(Map<String, dynamic> source) {
@@ -2703,8 +2713,5 @@ class DefectAnnotationPainter extends CustomPainter {
     return parsed;
   }
 }
-
-
-
 
 

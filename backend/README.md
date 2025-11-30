@@ -248,3 +248,10 @@ For issues and questions:
 - [ ] Multi-language support
 - [ ] Mobile app integration
 
+## YOLO endpoint (laptop-hosted inference)
+
+- Drop your YOLOv8 best.pt into backend/models/best.pt (override with YOLO_MODEL_PATH if needed).
+- Start the API from backend/: venv\\Scripts\\python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload (or the equivalent on macOS/Linux).
+- POST /api/v1/yolo/predict with a multipart image field to get detections/masks back; adjust conf/iou query params as needed.
+- GET /api/v1/yolo/info returns the loaded model path, device, and class map.
+- No TFLite involved; everything runs on the laptop CPU/GPU via PyTorch/Ultralytics.

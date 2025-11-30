@@ -361,7 +361,7 @@ class ApiService {
       // Create multipart request
       var request = http.MultipartRequest(
         'POST',
-        Uri.parse('$apiUrl/api/v1/scan'),
+        Uri.parse('$apiUrl/api/v1/yolo/predict'),
       );
 
       // Add the image file
@@ -384,10 +384,8 @@ class ApiService {
 
       if (response.statusCode == 200) {
         final jsonResponse = json.decode(response.body);
-        return {
-          'success': true,
-          'data': jsonResponse,
-        };
+        final normalized = _normalizeYoloResponse(jsonResponse);
+        return {'success': true, 'data': normalized};
       } else {
         _logApiService('API Error: ${response.statusCode} - ${response.body}');
         return {
@@ -406,6 +404,221 @@ class ApiService {
         'error': 'Network error: $e',
       };
     }
+  }
+
+  static Map<String, dynamic> _normalizeYoloResponse(Map<String, dynamic> jsonResponse) {
+    // Bean detections (classification)
+    final List<dynamic> rawDetections = (jsonResponse['detections'] as List?) ?? const [];
+    final Map<String, dynamic> classMap = {};
+    final rawClasses = jsonResponse['classes'];
+    if (rawClasses is Map) {
+      rawClasses.forEach((key, value) => classMap[key.toString()] = value.toString());
+    }
+
+    final Map<String, dynamic> imageSize = jsonResponse['image_size'] is Map
+        ? Map<String, dynamic>.from(jsonResponse['image_size'] as Map)
+        : const <String, dynamic>{};
+
+    final List<Map<String, dynamic>> beanDetections = [];
+    for (final det in rawDetections) {
+      if (det is! Map) continue;
+      final detMap = Map<String, dynamic>.from(det);
+      final bbox = detMap['bbox'];
+      Map<String, dynamic> coords = {};
+      if (bbox is Map) {
+        coords = {
+          'x1': (bbox['x1'] as num?)?.toDouble() ?? 0.0,
+          'y1': (bbox['y1'] as num?)?.toDouble() ?? 0.0,
+          'x2': (bbox['x2'] as num?)?.toDouble() ?? 0.0,
+          'y2': (bbox['y2'] as num?)?.toDouble() ?? 0.0,
+          'width': (bbox['width'] as num?)?.toDouble() ?? 0.0,
+          'height': (bbox['height'] as num?)?.toDouble() ?? 0.0,
+        };
+      }
+      detMap['coordinates'] = coords;
+      beanDetections.add(detMap);
+    }
+
+    final Map<String, dynamic>? top =
+        beanDetections.isNotEmpty ? Map<String, dynamic>.from(beanDetections.first) : null;
+    final String topClass = (top?['class_name'] ?? top?['defect_type'] ?? 'Unknown').toString();
+    final double topConf = (top?['confidence'] as num?)?.toDouble() ?? 0.0;
+
+    // Map YOLO class to expected bean classes list (CoffeeNet order)
+    const List<String> beanTypes = <String>['Liberica', 'Arabica', 'Robusta', 'Excelsa'];
+    final Map<String, String> nameMap = {
+      'arabica': 'Arabica',
+      'robusta': 'Robusta',
+      'liberica': 'Liberica',
+      'excelsa': 'Excelsa',
+    };
+    final List<double> probabilityList = List<double>.filled(beanTypes.length, 0.0);
+    final String normalizedTop = nameMap[topClass.toLowerCase()] ?? topClass;
+    int mappedIdx = beanTypes.indexWhere(
+      (name) => name.toLowerCase() == normalizedTop.toLowerCase(),
+    );
+    if (mappedIdx < 0 && beanTypes.isNotEmpty) {
+      mappedIdx = 0;
+    }
+    if (mappedIdx >= 0 && mappedIdx < probabilityList.length) {
+      probabilityList[mappedIdx] = topConf;
+    }
+
+    final Map<String, dynamic> prediction = {
+      'predicted_class': mappedIdx >= 0 && mappedIdx < beanTypes.length ? beanTypes[mappedIdx] : normalizedTop,
+      'confidence': topConf,
+      'all_probabilities': probabilityList,
+      'classes': beanTypes,
+      'raw_class': topClass,
+    };
+
+    // Defect detections: prefer separate defect model output if provided
+    final Map<String, dynamic> defectPayload =
+        jsonResponse['defect'] is Map ? Map<String, dynamic>.from(jsonResponse['defect'] as Map) : const {};
+    final List<dynamic> rawDefects = (defectPayload['detections'] as List?) ?? const [];
+    final List<Map<String, dynamic>> defectDetections = [];
+    final Map<String, int> defectTypes = {};
+
+    if (rawDefects.isNotEmpty) {
+      for (final det in rawDefects) {
+        if (det is! Map) continue;
+        final detMap = Map<String, dynamic>.from(det);
+        final bbox = detMap['bbox'];
+        Map<String, dynamic> coords = {};
+        if (bbox is Map) {
+          coords = {
+            'x1': (bbox['x1'] as num?)?.toDouble() ?? 0.0,
+            'y1': (bbox['y1'] as num?)?.toDouble() ?? 0.0,
+            'x2': (bbox['x2'] as num?)?.toDouble() ?? 0.0,
+            'y2': (bbox['y2'] as num?)?.toDouble() ?? 0.0,
+            'width': (bbox['width'] as num?)?.toDouble() ?? 0.0,
+            'height': (bbox['height'] as num?)?.toDouble() ?? 0.0,
+          };
+        }
+        detMap['coordinates'] = coords;
+        detMap['defect_type'] = detMap['class_name'] ?? detMap['defect_type'] ?? detMap['label'] ?? 'unknown';
+        if (imageSize.isNotEmpty) {
+          detMap['image_size'] = {
+            'width': (imageSize['width'] as num?)?.toDouble(),
+            'height': (imageSize['height'] as num?)?.toDouble(),
+          };
+          detMap['image_width'] = (imageSize['width'] as num?)?.toDouble();
+          detMap['image_height'] = (imageSize['height'] as num?)?.toDouble();
+        }
+        String typeKey = detMap['defect_type'].toString();
+        if (typeKey.isEmpty || typeKey.toLowerCase() == 'unknown') {
+          typeKey = 'good_bean';
+          detMap['defect_type'] = typeKey;
+        }
+        defectTypes[typeKey] = (defectTypes[typeKey] ?? 0) + 1;
+        defectDetections.add(detMap);
+      }
+    } else {
+      // Fallback: no separate defect model; reuse bean detections
+      for (final detMap in beanDetections) {
+        String typeKey = detMap['defect_type']?.toString() ??
+            detMap['class_name']?.toString() ??
+            'unknown';
+        if (typeKey.isEmpty || typeKey.toLowerCase() == 'unknown') {
+          typeKey = 'good_bean';
+          detMap['defect_type'] = typeKey;
+        }
+        defectTypes[typeKey] = (defectTypes[typeKey] ?? 0) + 1;
+        defectDetections.add(detMap);
+      }
+    }
+
+    // Keep all detections (for masks/visuals), but treat "good_bean" as non-defect in scoring
+    final List<Map<String, dynamic>> allDefects = defectDetections;
+    final List<Map<String, dynamic>> filteredDefects = defectDetections
+        .where((d) => (d['defect_type']?.toString().toLowerCase() ?? '') != 'good_bean')
+        .toList();
+    final Map<String, int> filteredTypes = {};
+    for (final entry in defectTypes.entries) {
+      if (entry.key.toLowerCase() == 'good_bean') continue;
+      filteredTypes[entry.key] = entry.value;
+    }
+
+    const Map<String, double> defectWeights = {
+      'broken_cut': 0.35,
+      'fully_black': 0.4,
+      'insect_damage': 0.3,
+      'roasted_beans': 0.15,
+    };
+
+    double weightedScore = 0.0;
+    for (final defect in filteredDefects) {
+      final String key = defect['defect_type']?.toString().toLowerCase() ?? '';
+      final double weight = defectWeights[key] ?? 0.1;
+      final double conf = (defect['confidence'] as num?)?.toDouble() ?? 1.0;
+      weightedScore += weight * conf;
+    }
+
+    final double defectPercentage = min(100.0, weightedScore * 20.0);
+    // If no defects, treat as perfect score
+    final double qualityScore =
+        filteredDefects.isEmpty ? 1.0 : max(0.0, 1.0 - weightedScore * 0.2).toDouble();
+
+    String grade(double score) {
+      if (score >= 0.9) return 'A+';
+      if (score >= 0.8) return 'A';
+      if (score >= 0.7) return 'B+';
+      if (score >= 0.6) return 'B';
+      if (score >= 0.5) return 'C+';
+      if (score >= 0.4) return 'C';
+      if (score >= 0.3) return 'D';
+      return 'F';
+    }
+
+    final Map<String, dynamic> defectDetection = {
+      // Filtered for tables/metrics, but keep full list for overlays
+      'detections': filteredDefects,
+      'detections_all': allDefects,
+      'summary': <String, dynamic>{
+        'total_defects': filteredDefects.length,
+        'defect_types': filteredTypes,
+        'defect_percentage': defectPercentage,
+        'quality_score': qualityScore,
+        'quality_grade': grade(qualityScore),
+      },
+      'image_dimensions': {
+        'width': (imageSize['width'] as num?)?.toDouble() ?? 0.0,
+        'height': (imageSize['height'] as num?)?.toDouble() ?? 0.0,
+      },
+    };
+
+    final Map<String, dynamic> summary =
+        defectDetection['summary'] as Map<String, dynamic>;
+
+    final Map<String, dynamic> healthScore = {
+      'score': topConf,
+      'percentage': topConf * 100.0,
+      'grade': grade(topConf),
+      'defect_count': filteredDefects.length,
+    };
+
+    final Map<String, dynamic> shelfLife = {
+      'predicted_days': 180,
+      'confidence_score': qualityScore,
+      'category': 'estimated',
+      'defect_score': summary['total_defects'],
+      'defect_counts': filteredTypes,
+      'defect_percentage': defectPercentage,
+      'severity': summary['quality_grade'],
+      'quality_grade': summary['quality_grade'],
+      'base_shelf_life': 180,
+    };
+
+    return {
+      'success': jsonResponse['success'] ?? true,
+      'data': {
+        'prediction': prediction,
+        'defect_detection': defectDetection,
+        'health_score': healthScore,
+        'shelf_life': shelfLife,
+        'model': jsonResponse['model'],
+      },
+    };
   }
 
   /// Detect defects only in a coffee bean image

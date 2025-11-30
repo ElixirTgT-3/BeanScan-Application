@@ -13,6 +13,7 @@ torchaudio>=2.6.0
 numpy>=1.24.0
 Pillow>=10.0.0
 opencv-python>=4.8.0
+ultralytics>=8.1.0
 
 # Image Processing
 imageio>=2.31.0

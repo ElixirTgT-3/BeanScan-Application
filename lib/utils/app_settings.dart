@@ -8,7 +8,6 @@ class AppSettings extends ChangeNotifier {
 
   static const _autoSaveKey = 'auto_save_scans';
   static const _themeModeKey = 'theme_mode';
-
   bool _autoSaveScans = true;
   ThemeMode _themeMode = ThemeMode.light;
   SharedPreferences? _prefs;
