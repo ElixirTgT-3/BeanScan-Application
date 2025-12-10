@@ -54,22 +54,30 @@ class _BeanPainter extends CustomPainter {
     final leftX = rect.center.dx - rect.width * 0.08;
     final rightX = rect.center.dx + rect.width * 0.08;
 
-    // Build a polyline from top to bottom zig-zagging slightly
-    final steps = severityLevel == 1 ? 3 : (severityLevel == 2 ? 5 : 7);
-    final amp = severityLevel == 1 ? rect.width * 0.05 : (severityLevel == 2 ? rect.width * 0.08 : rect.width * 0.12);
+    if (severityLevel <= 0) {
+      // Normal: straight, centered line
+      crack.moveTo(rect.center.dx, rect.top + rect.height * 0.1);
+      crack.lineTo(rect.center.dx, rect.bottom - rect.height * 0.1);
+    } else {
+      // Build a polyline from top to bottom zig-zagging slightly
+      final steps = severityLevel == 1 ? 3 : (severityLevel == 2 ? 5 : 7);
+      final amp = severityLevel == 1
+          ? rect.width * 0.05
+          : (severityLevel == 2 ? rect.width * 0.08 : rect.width * 0.12);
 
-    double y = rect.top + rect.height * 0.1;
-    final yStep = (rect.height * 0.8) / steps;
-    bool toRight = true;
+      double y = rect.top + rect.height * 0.1;
+      final yStep = (rect.height * 0.8) / steps;
+      bool toRight = true;
 
-    crack.moveTo(leftX, y);
-    for (int i = 0; i < steps; i++) {
-      y += yStep;
-      final x = rect.center.dx + (toRight ? amp : -amp);
-      crack.lineTo(x, y);
-      toRight = !toRight;
+      crack.moveTo(leftX, y);
+      for (int i = 0; i < steps; i++) {
+        y += yStep;
+        final x = rect.center.dx + (toRight ? amp : -amp);
+        crack.lineTo(x, y);
+        toRight = !toRight;
+      }
+      crack.lineTo(rightX, rect.bottom - rect.height * 0.1);
     }
-    crack.lineTo(rightX, rect.bottom - rect.height * 0.1);
 
     canvas.drawPath(crack, stroke);
   }

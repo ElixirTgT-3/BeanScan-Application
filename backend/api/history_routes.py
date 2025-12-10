@@ -250,10 +250,57 @@ async def get_scan_history(
         query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
         
         result = query.execute()
+        scans = result.data or []
+
+        # Attach shelf-life rows so clients can show the stored estimate without recomputing
+        shelf_life_map = {}
+        shelf_life_ids = [row.get("shelf_life_id") for row in scans if row.get("shelf_life_id")]
+        if shelf_life_ids:
+            try:
+                shelf_rows = (
+                    supabase
+                    .table(SHELF_LIFE_TABLE)
+                    .select("*")
+                    .in_("shelf_life_id", shelf_life_ids)
+                    .execute()
+                ).data or []
+                shelf_life_map = {}
+                for row in shelf_rows:
+                    if "shelf_life_id" not in row:
+                        continue
+                    # Add derived months so clients don't have to recompute
+                    sl_copy = dict(row)
+                    if "predicted_days" in sl_copy and "estimated_months" not in sl_copy:
+                        try:
+                            days_val = float(sl_copy["predicted_days"])
+                            sl_copy["estimated_months"] = days_val / 30.0
+                            sl_copy["predicted_months"] = sl_copy["estimated_months"]
+                        except Exception:
+                            pass
+                    shelf_life_map[row["shelf_life_id"]] = sl_copy
+            except Exception as e:
+                print(f"[DEBUG] Failed to enrich shelf life data for history rows: {e}")
+
+        enriched_scans = []
+        for row in scans:
+            row_copy = dict(row)
+            sl_id = row_copy.get("shelf_life_id")
+            if sl_id in shelf_life_map:
+                row_copy["shelf_life"] = shelf_life_map[sl_id]
+                if "predicted_months" not in row_copy and "predicted_days" not in row_copy:
+                    try:
+                        pm = shelf_life_map[sl_id].get("estimated_months") or shelf_life_map[sl_id].get("predicted_months")
+                        if pm is None and "predicted_days" in shelf_life_map[sl_id]:
+                            pm = float(shelf_life_map[sl_id]["predicted_days"]) / 30.0
+                        if pm is not None:
+                            row_copy["predicted_months"] = pm
+                    except Exception:
+                        pass
+            enriched_scans.append(row_copy)
         
         return JSONResponse(content={
-            "scans": result.data,
-            "total": len(result.data),
+            "scans": enriched_scans,
+            "total": len(enriched_scans),
             "limit": limit,
             "offset": offset
         })
@@ -286,9 +333,56 @@ async def get_history_by_device(
             .range(offset, offset + limit - 1)
             .execute()
         )
+        scans = result.data or []
+
+        # Attach shelf-life rows for device-scoped history
+        shelf_life_map = {}
+        shelf_life_ids = [row.get("shelf_life_id") for row in scans if row.get("shelf_life_id")]
+        if shelf_life_ids:
+            try:
+                shelf_rows = (
+                    supabase
+                    .table(SHELF_LIFE_TABLE)
+                    .select("*")
+                    .in_("shelf_life_id", shelf_life_ids)
+                    .execute()
+                ).data or []
+                shelf_life_map = {}
+                for row in shelf_rows:
+                    if "shelf_life_id" not in row:
+                        continue
+                    sl_copy = dict(row)
+                    if "predicted_days" in sl_copy and "estimated_months" not in sl_copy:
+                        try:
+                            days_val = float(sl_copy["predicted_days"])
+                            sl_copy["estimated_months"] = days_val / 30.0
+                            sl_copy["predicted_months"] = sl_copy["estimated_months"]
+                        except Exception:
+                            pass
+                    shelf_life_map[row["shelf_life_id"]] = sl_copy
+            except Exception as e:
+                print(f"[DEBUG] Failed to enrich shelf life data for device history: {e}")
+
+        enriched_scans = []
+        for row in scans:
+            row_copy = dict(row)
+            sl_id = row_copy.get("shelf_life_id")
+            if sl_id in shelf_life_map:
+                row_copy["shelf_life"] = shelf_life_map[sl_id]
+                if "predicted_months" not in row_copy and "predicted_days" not in row_copy:
+                    try:
+                        pm = shelf_life_map[sl_id].get("estimated_months") or shelf_life_map[sl_id].get("predicted_months")
+                        if pm is None and "predicted_days" in shelf_life_map[sl_id]:
+                            pm = float(shelf_life_map[sl_id]["predicted_days"]) / 30.0
+                        if pm is not None:
+                            row_copy["predicted_months"] = pm
+                    except Exception:
+                        pass
+            enriched_scans.append(row_copy)
+
         return JSONResponse(content={
-            "scans": result.data,
-            "total": len(result.data),
+            "scans": enriched_scans,
+            "total": len(enriched_scans),
             "limit": limit,
             "offset": offset
         })

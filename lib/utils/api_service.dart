@@ -597,8 +597,43 @@ class ApiService {
       'defect_count': filteredDefects.length,
     };
 
+    // Fallback shelf-life estimation using table midpoints
+    double _baseDaysForBean(String bean) {
+      final lower = bean.toLowerCase();
+      if (lower.contains('arabica') || lower.contains('liberica')) return 1095; // 36.5 mo
+      if (lower.contains('excelsa')) return 900; // 30 mo
+      if (lower.contains('robusta')) return 720; // 24 mo
+      return 720; // commodity baseline
+    }
+
+    double _estimateDaysForDefects(Map<String, int> types, double baseDays) {
+      final hasRoast = types.keys.any((k) => k.contains('roast'));
+      final hasBlack = types.keys.any((k) => k.contains('black'));
+      final hasInsect = types.keys.any((k) => k.contains('insect') || k.contains('borer'));
+      final hasBroken = types.keys.any((k) =>
+          k.contains('broken') || k.contains('cut') || k.contains('chip') || k.contains('crack') || k.contains('physical'));
+
+      if (hasRoast) return 9 * 30.0; // midpoint 7–12 mo
+      if (hasBlack) return 12 * 30.0; // midpoint 10–14 mo
+      if (hasInsect) return 14 * 30.0; // midpoint 12–16 mo
+      if (hasBroken) return 22.5 * 30.0; // midpoint 18–27 mo
+      if (types.isNotEmpty) return 18 * 30.0; // general defects mixed 12–24 mo midpoint
+      return baseDays;
+    }
+
+    final String beanLabel = (prediction['predicted_class'] ??
+            prediction['prediction'] ??
+            prediction['raw_class'] ??
+            '')
+        .toString();
+    final double baseDays = _baseDaysForBean(beanLabel);
+    final double predictedDays = _estimateDaysForDefects(filteredTypes, baseDays);
+    final double estimatedMonths = predictedDays / 30.0;
+
     final Map<String, dynamic> shelfLife = {
-      'predicted_days': 180,
+      'predicted_days': predictedDays,
+      'predicted_months': estimatedMonths,
+      'estimated_months': estimatedMonths,
       'confidence_score': qualityScore,
       'category': 'estimated',
       'defect_score': summary['total_defects'],
@@ -606,7 +641,7 @@ class ApiService {
       'defect_percentage': defectPercentage,
       'severity': summary['quality_grade'],
       'quality_grade': summary['quality_grade'],
-      'base_shelf_life': 180,
+      'base_shelf_life': baseDays,
     };
 
     return {

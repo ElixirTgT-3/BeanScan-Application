@@ -351,6 +351,24 @@ async def scan_bean_image(
             )
             analysis_results['defect_detection'] = defect_detection
             health_score = analysis_results['health_score']
+
+            clean_labels = {
+                'good_bean',
+                'goodbean',
+                'good',
+                'healthy',
+                'clean',
+                'background',
+                'no_defect',
+            }
+
+            def _is_good_detection(det: Any) -> bool:
+                if not isinstance(det, dict):
+                    return False
+                label = (det.get('defect_type') or det.get('type') or '').strip().lower()
+                return label in clean_labels
+
+            defect_detections_for_scoring = [d for d in defect_detection if not _is_good_detection(d)]
             
             print(f"[STATS] Analysis complete: Bean={bean_classification[0]['class']}, Health={health_score['grade']}")
             
@@ -454,9 +472,9 @@ async def scan_bean_image(
             
             # Create defect records
             defect_id = None
-            if defect_detection and image_id:
+            if defect_detections_for_scoring and image_id:
                 try:
-                    for defect in defect_detection:
+                    for defect in defect_detections_for_scoring:
                         defect_data = {
                             "image_id": image_id,
                             "defect_type": defect['defect_type'],
@@ -479,8 +497,8 @@ async def scan_bean_image(
             
             # Prepare defect sequence for rule-based prediction
             defect_sequence = []
-            if defect_detection:
-                for defect in defect_detection:
+            if defect_detections_for_scoring:
+                for defect in defect_detections_for_scoring:
                     defect_type = defect.get('type') or defect.get('defect_type') or 'unknown'
                     defect_sequence.append({
                         'type': defect_type,
@@ -494,7 +512,7 @@ async def scan_bean_image(
                 bean_type_name
             )
             defect_summary = {
-                "total_defects": len(defect_detection),
+                "total_defects": len(defect_detections_for_scoring),
                 "defect_types": shelf_life_prediction.get('defect_counts', {}),
                 "defect_percentage": shelf_life_prediction.get('defect_percentage', 0.0),
                 "quality_score": health_score.get('percentage', 0.0),
@@ -537,7 +555,7 @@ async def scan_bean_image(
                 "healthy_percent": healthy_percent,
                 "defective_percent": defective_percent,
                 "confidence_score": bean_classification[0]['confidence'],
-                "notes": f"Health Grade: {health_score['grade']}, Defects: {len(defect_detection)}"
+                "notes": f"Health Grade: {health_score['grade']}, Defects: {len(defect_detections_for_scoring)}"
             }
             
             history_id = None

@@ -130,6 +130,23 @@ class _HistoryPageState extends State<HistoryPage> {
       return bDate.compareTo(aDate);
     });
 
+    // Debug: log a few merged items to verify shelf-life/defect fields
+    for (int i = 0; i < combined.length && i < 5; i++) {
+      final item = combined[i];
+      try {
+        final Map<String, dynamic> shelfLifeDebug =
+            _deriveShelfLifeMap(Map<String, dynamic>.from(item)) ?? <String, dynamic>{};
+        debugPrint(
+          '[HISTORY DEBUG] idx=$i id=${item['history_id']} bean=${item['bean_type_name'] ?? item['bean_type']} '
+          'defect%=${item['defective_percent'] ?? shelfLifeDebug['defect_percentage']} '
+          'shelfLifeMonths=${shelfLifeDebug['estimated_months'] ?? shelfLifeDebug['predicted_months'] ?? item['predicted_months']} '
+          'shelfLifeDays=${shelfLifeDebug['predicted_days'] ?? item['predicted_days']} raw_keys=${item.keys}',
+        );
+      } catch (e) {
+        debugPrint('[HISTORY DEBUG] idx=$i failed to log item: $e');
+      }
+    }
+
     if (!mounted) return;
     setState(() {
       _items = combined;
@@ -317,108 +334,143 @@ class _HistoryPageState extends State<HistoryPage> {
             .withValues(alpha: isDark ? 0.75 : 0.9);
     final String dateLabel = _formatHistoryTimestamp(item['created_at']);
     final String shelfLifeLabel = _formatShelfLifeLabel(item);
-
     return InkWell(
       onTap: () async {
         try {
           final historyId = item['history_id'];
           final localData = item['local_data'] as Map<String, dynamic>?;
 
-        if (historyId == null && localData != null) {
-          final predictionMap =
-              localData['prediction'] as Map<String, dynamic>? ?? {};
-          final probabilities = <String, double>{};
-          final rawProbs = predictionMap['all_probabilities'];
-          if (rawProbs is Map) {
-            for (final entry in rawProbs.entries) {
-              final value = entry.value;
-              if (value is num) {
-                probabilities[entry.key.toString()] = value.toDouble();
+          if (historyId == null && localData != null) {
+            final predictionMap =
+                localData['prediction'] as Map<String, dynamic>? ?? {};
+            final probabilities = <String, double>{};
+            final rawProbs = predictionMap['all_probabilities'];
+            if (rawProbs is Map) {
+              for (final entry in rawProbs.entries) {
+                final value = entry.value;
+                if (value is num) {
+                  probabilities[entry.key.toString()] = value.toDouble();
+                }
               }
             }
-          }
-          final prediction = BeanPrediction(
-            prediction: (predictionMap['prediction'] ?? beanType).toString(),
-            confidence:
-                (predictionMap['confidence'] as num?)?.toDouble() ??
-                (item['confidence_score'] as num?)?.toDouble() ??
-                0.0,
-            allProbabilities: probabilities,
-          );
+            final prediction = BeanPrediction(
+              prediction: (predictionMap['prediction'] ?? beanType).toString(),
+              confidence:
+                  (predictionMap['confidence'] as num?)?.toDouble() ??
+                  (item['confidence_score'] as num?)?.toDouble() ??
+                  0.0,
+              allProbabilities: probabilities,
+            );
 
-          final fallbackDefectivePct = _asDouble(item['defective_percent']);
-          final localShelfLife = _cloneMap(localData['shelf_life']);
-          if (fallbackDefectivePct != null && localShelfLife != null) {
-            localShelfLife.putIfAbsent(
-              'defect_percentage',
-              () => fallbackDefectivePct,
-            );
-            localShelfLife.putIfAbsent(
-              'defective_percent',
-              () => fallbackDefectivePct,
-            );
-          }
-          Map<String, dynamic>? localDefectDetection = _cloneMap(
-            localData['defect_detection'],
-          );
-          if (localDefectDetection != null) {
-            final summary =
-                _cloneMap(localDefectDetection['summary']) ??
-                <String, dynamic>{};
-            if (fallbackDefectivePct != null) {
-              summary.putIfAbsent(
+            final fallbackDefectivePct = _asDouble(item['defective_percent']);
+            Map<String, dynamic>? localShelfLife = _cloneMap(localData['shelf_life']);
+            if (fallbackDefectivePct != null && localShelfLife != null) {
+              localShelfLife.putIfAbsent(
                 'defect_percentage',
                 () => fallbackDefectivePct,
               );
+              localShelfLife.putIfAbsent(
+                'defective_percent',
+                () => fallbackDefectivePct,
+              );
             }
-            _ensureSeverityConsistency(
-              summary: summary,
-              shelfLifeData: localShelfLife,
-              fallbackPercentage: fallbackDefectivePct,
+            Map<String, dynamic>? localDefectDetection = _cloneMap(
+              localData['defect_detection'],
             );
-            localDefectDetection['summary'] = summary;
-            
-            // Ensure image_dimensions is preserved for proper defect annotation scaling
-            final dynamic existingDims = localDefectDetection['image_dimensions'] ?? localDefectDetection['image_size'];
-            if (existingDims is Map) {
-              final dimsMap = Map<String, dynamic>.from(existingDims);
-              final double? existingWidth = _asDouble(dimsMap['width']);
-              final double? existingHeight = _asDouble(dimsMap['height']);
-              if (existingWidth != null && existingHeight != null && existingWidth > 0 && existingHeight > 0) {
-                // Already has valid dimensions, keep them
-                localDefectDetection['image_dimensions'] = {
-                  'width': existingWidth,
-                  'height': existingHeight,
-                };
+            if (localDefectDetection != null) {
+              final summary =
+                  _cloneMap(localDefectDetection['summary']) ??
+                  <String, dynamic>{};
+              if (fallbackDefectivePct != null) {
+                summary.putIfAbsent(
+                  'defect_percentage',
+                  () => fallbackDefectivePct,
+                );
+                summary.putIfAbsent(
+                  'defective_percent',
+                  () => fallbackDefectivePct,
+                );
+              }
+          _ensureSeverityConsistency(
+            summary: summary,
+            shelfLifeData: localShelfLife,
+            fallbackPercentage: fallbackDefectivePct,
+          );
+              // Normalize months from days for local shelf life (override stale months)
+              if (localShelfLife != null) {
+                final double? pd = _asDouble(localShelfLife['predicted_days']) ??
+                    _asDouble(localShelfLife['raw_prediction']);
+                if (pd != null && pd > 0) {
+                  final double pm = pd / 30.0;
+                  localShelfLife['predicted_days'] = pd;
+                  localShelfLife['predicted_months'] = pm;
+                  localShelfLife['estimated_months'] = pm;
+                }
+              }
+              localDefectDetection['summary'] = summary;
+              
+              // Ensure image_dimensions is preserved for proper defect annotation scaling
+              final dynamic existingDims = localDefectDetection['image_dimensions'] ?? localDefectDetection['image_size'];
+              if (existingDims is Map) {
+                final dimsMap = Map<String, dynamic>.from(existingDims);
+                final double? existingWidth = _asDouble(dimsMap['width']);
+                final double? existingHeight = _asDouble(dimsMap['height']);
+                if (existingWidth != null && existingHeight != null && existingWidth > 0 && existingHeight > 0) {
+                  // Already has valid dimensions, keep them
+                  localDefectDetection['image_dimensions'] = {
+                    'width': existingWidth,
+                    'height': existingHeight,
+                  };
+                }
+              }
+            } else {
+              _ensureSeverityConsistency(
+                summary: null,
+                shelfLifeData: localShelfLife,
+                fallbackPercentage: fallbackDefectivePct,
+              );
+              if (localShelfLife != null) {
+                final double? pd = _asDouble(localShelfLife['predicted_days']) ??
+                    _asDouble(localShelfLife['raw_prediction']);
+                if (pd != null && pd > 0) {
+                  final double pm = pd / 30.0;
+                  localShelfLife['predicted_months'] ??= pm;
+                  localShelfLife['estimated_months'] ??= pm;
+                }
               }
             }
-          } else {
-            _ensureSeverityConsistency(
-              summary: null,
-              shelfLifeData: localShelfLife,
-              fallbackPercentage: fallbackDefectivePct,
-            );
-          }
 
-          if (!context.mounted) {
+            if (!context.mounted) {
+              return;
+            }
+
+            // Normalize months from days for local shelf life just before navigation
+            if (localShelfLife != null) {
+              final double? pdFinal = _asDouble(localShelfLife['predicted_days']) ??
+                  _asDouble(localShelfLife['raw_prediction']);
+              if (pdFinal != null && pdFinal > 0) {
+                final double pmFinal = pdFinal / 30.0;
+                localShelfLife['predicted_days'] = pdFinal;
+                localShelfLife['predicted_months'] = pmFinal;
+                localShelfLife['estimated_months'] = pmFinal;
+              }
+            }
+
+            final navigator = Navigator.of(context);
+            await navigator.push(
+              MaterialPageRoute(
+                builder: (_) => ResultsPage.history(
+                  prediction: prediction,
+                  imagePath:
+                      (localData['image_path'] ?? item['image_url'] ?? '')
+                          as String,
+                  defectDetection: localDefectDetection,
+                  shelfLife: localShelfLife,
+                ),
+              ),
+            );
             return;
           }
-
-          final navigator = Navigator.of(context);
-          await navigator.push(
-            MaterialPageRoute(
-              builder: (_) => ResultsPage.history(
-                prediction: prediction,
-                imagePath:
-                    (localData['image_path'] ?? item['image_url'] ?? '')
-                        as String,
-                defectDetection: localDefectDetection,
-                shelfLife: localShelfLife,
-              ),
-            ),
-          );
-          return;
-        }
 
         if (historyId == null) {
           return;
@@ -462,6 +514,15 @@ class _HistoryPageState extends State<HistoryPage> {
           'defective_percent',
           () => effectiveDefectivePct,
         );
+        // Normalize months from days (always trust days for detail view, override stale months)
+        final double? pdServer = _asDouble(shelfLifeMap['predicted_days']) ??
+            _asDouble(shelfLifeMap['raw_prediction']);
+        if (pdServer != null && pdServer > 0) {
+          final double pm = pdServer / 30.0;
+          shelfLifeMap['predicted_days'] = pdServer;
+          shelfLifeMap['estimated_months'] = pm;
+          shelfLifeMap['predicted_months'] = pm;
+        }
 
         if (defectDetection != null) {
           final summary =
@@ -606,22 +667,6 @@ class _HistoryPageState extends State<HistoryPage> {
                     ),
                   ),
                   const SizedBox(height: 4),
-                  Text(
-                    'Defective: ${defectivePct.toStringAsFixed(1)}%',
-                    style: TextStyle(
-                      color: bodyTextColor,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    shelfLifeLabel,
-                    style: TextStyle(
-                      color: bodyTextColor.withValues(alpha: 0.9),
-                      fontSize: 12,
-                    ),
-                  ),
                 ],
               ),
             ),
@@ -776,36 +821,94 @@ class _HistoryPageState extends State<HistoryPage> {
 
   double? _extractShelfLifeMonths(dynamic item) {
     if (item is! Map<String, dynamic>) return null;
-
-    double? months =
-        _asDouble(item['predicted_months']) ??
-        _asDouble(item['estimated_months']);
+    final bool localOnly = item['history_id'] == null;
 
     final Map<String, dynamic>? shelfLifeMap =
         _deriveShelfLifeMap(Map<String, dynamic>.from(item));
-    months ??=
+
+    // Prefer enriched shelf life attached to history rows (backend now sends this)
+    if (shelfLifeMap != null) {
+      final double? enrichedDays =
+          _asDouble(shelfLifeMap['predicted_days']) ?? _asDouble(shelfLifeMap['raw_prediction']);
+      if (enrichedDays != null && enrichedDays > 0) {
+        return double.parse((enrichedDays / 30.0).toStringAsFixed(1));
+      }
+      final double? enrichedMonths =
+          _asDouble(shelfLifeMap['estimated_months']) ?? _asDouble(shelfLifeMap['predicted_months']);
+      if (enrichedMonths != null && enrichedMonths > 0 && !enrichedMonths.isNaN) {
+        return enrichedMonths;
+      }
+    }
+
+    // For local entries that still carry only the stale 180-day cache, recompute immediately.
+    if (localOnly) {
+      return _recomputeLocalShelfLifeMonths(item);
+    }
+
+    final double? itemDays = _asDouble(item['predicted_days']);
+    if (itemDays != null && itemDays > 0) {
+      return double.parse((itemDays / 30.0).toStringAsFixed(1));
+    }
+
+    final double? itemMonths =
+        _asDouble(item['predicted_months']) ?? _asDouble(item['estimated_months']);
+    if (itemMonths != null && itemMonths > 0 && !itemMonths.isNaN) {
+      return itemMonths;
+    }
+
+    final double? storedDays =
+        _asDouble(shelfLifeMap?['predicted_days']) ??
+        _asDouble(shelfLifeMap?['raw_prediction']);
+    if (storedDays != null && storedDays > 0) {
+      return double.parse((storedDays / 30.0).toStringAsFixed(1));
+    }
+
+    final double? storedMonths =
         _asDouble(shelfLifeMap?['predicted_months']) ??
         _asDouble(shelfLifeMap?['estimated_months']);
-
-    if (months != null) {
-      return months.isNaN ? null : months;
+    if (storedMonths != null && storedMonths > 0 && !storedMonths.isNaN) {
+        return storedMonths;
     }
 
-    final double? days =
-        _asDouble(shelfLifeMap?['predicted_days']) ??
-        _asDouble(shelfLifeMap?['raw_prediction']) ??
-        _asDouble(item['predicted_days']);
-    if (days != null && !days.isNaN && days > 0) {
-      return days / 30.0;
-    }
-    return null;
+    // Fallback: recompute using weighted defect score (includes good beans).
+    final Map<String, dynamic>? defectDetection = _resolveDefectDetection(Map<String, dynamic>.from(item));
+    final List<dynamic> detections = _extractDetections(defectDetection);
+    final Map<String, dynamic>? shelfCounts = shelfLifeMap?['defect_counts'] is Map
+        ? Map<String, dynamic>.from(shelfLifeMap!['defect_counts'] as Map)
+        : null;
+    final double weightedDays = _historyWeightedShelfLifeDays(
+          typeCounts: shelfCounts,
+          detections: detections,
+        ) ??
+        30.0;
+
+    return double.parse((weightedDays / 30.0).toStringAsFixed(1));
+  }
+
+  double? _preferDaysWhenMismatch(double? days, double? months) {
+    // Deprecated: no longer used
+    return months;
   }
 
   double _deriveDefectPercentage(dynamic raw) {
     if (raw is! Map<String, dynamic>) return 0.0;
     final Map<String, dynamic> map = raw;
 
+    // Prefer direct values provided by the backend row first
+    final double? directPct =
+        _asDouble(map['defective_percent']) ?? _asDouble(map['defect_percentage']);
+    if (directPct != null && directPct >= 0) {
+      return directPct;
+    }
+
     final Map<String, dynamic>? shelfLife = _deriveShelfLifeMap(map);
+    // Prefer enriched shelf life defect percentage if present
+    final double? enrichedPct =
+        _asDouble(shelfLife?['defect_percentage']) ?? _asDouble(map['defect_percentage']);
+    if (enrichedPct != null && enrichedPct > 0) {
+      return enrichedPct;
+    }
+
     final Map<String, dynamic>? defectDetection = _resolveDefectDetection(map);
     final List<dynamic> detections = _extractDetections(defectDetection);
     final Map<String, dynamic> summary = _buildHistoryDefectSummary(
@@ -819,20 +922,16 @@ class _HistoryPageState extends State<HistoryPage> {
       shelfLife?['defect_percentage'] ?? shelfLife?['defective_percent'],
     );
     final double? summaryPct = _asDouble(summary['defect_percentage']);
-    final double? storedHistoryPct = _asDouble(map['defective_percent']) ??
-        _asDouble(_cloneMap(map['history'])?['defective_percent']) ??
-        _asDouble(_cloneMap(map['local_data'])?['defective_percent']) ??
-        _asDouble(_cloneMap(map['localData'])?['defective_percent']);
 
-    double? resolvedCandidate = shelfLifePct;
-    if (resolvedCandidate == null ||
-        (resolvedCandidate <= 0 && summaryPct != null && summaryPct > 0)) {
-      resolvedCandidate = summaryPct;
+    double? resolvedCandidate = summaryPct;
+    if (resolvedCandidate == null || resolvedCandidate <= 0) {
+      resolvedCandidate = shelfLifePct;
     }
-    if ((resolvedCandidate == null || resolvedCandidate <= 0) &&
-        storedHistoryPct != null &&
-        storedHistoryPct > 0) {
-      resolvedCandidate = storedHistoryPct;
+    if (resolvedCandidate == null || resolvedCandidate <= 0) {
+      resolvedCandidate = _asDouble(map['defective_percent']) ??
+          _asDouble(_cloneMap(map['history'])?['defective_percent']) ??
+          _asDouble(_cloneMap(map['local_data'])?['defective_percent']) ??
+          _asDouble(_cloneMap(map['localData'])?['defective_percent']);
     }
 
     final int totalDefects =
@@ -841,27 +940,16 @@ class _HistoryPageState extends State<HistoryPage> {
             : detections.length;
 
     double resolvedPctValue;
-    if (totalDefects > 0) {
-      double detectionDrivenPct = resolvedCandidate ?? 0.0;
-      if (detectionDrivenPct <= 0) {
-        detectionDrivenPct =
+    if (resolvedCandidate != null && resolvedCandidate > 0) {
+      resolvedPctValue = resolvedCandidate;
+    } else {
+      if (totalDefects > 0) {
+        double detectionDrivenPct =
             _estimateDefectPercentageFromDetections(detections) ??
                 (totalDefects / math.max(totalDefects, 12)) * 100.0;
-      }
-      resolvedPctValue = detectionDrivenPct;
-      if (resolvedPctValue < 28.0) {
-        resolvedPctValue = 28.0;
-      }
-    } else {
-      if (resolvedCandidate != null) {
-        resolvedPctValue = resolvedCandidate;
+        resolvedPctValue = detectionDrivenPct;
       } else {
-        final double confidence = _asDouble(map['confidence_score']) ??
-            _asDouble(shelfLife?['confidence_score']) ??
-            _asDouble(summary['confidence']) ??
-            0.0;
-        resolvedPctValue =
-            ((1.0 - confidence).clamp(0.0, 1.0)) * 40.0;
+        resolvedPctValue = 0.0;
       }
     }
 
@@ -901,6 +989,219 @@ class _HistoryPageState extends State<HistoryPage> {
         resolveShelfLife(_cloneMap(map['localData'])) ??
         resolveShelfLife(_cloneMap(map['payload'])) ??
         resolveShelfLife(_cloneMap(map['data']));
+  }
+
+  static const Map<String, int> _baseShelfLifeDaysHistory = {
+    'arabica': 900, // 30 months baseline
+    'liberica': 840, // 28 months baseline
+    'excelsa': 780, // 26 months baseline
+    'robusta': 750, // 25 months baseline
+    'other': 600, // 20 months baseline
+  };
+
+  static const Map<String, double> _historyDefectWeights = {
+    'fully black': 1.0,
+    'fully_black': 1.0,
+    'black bean': 1.0,
+    'roasted': 0.7,
+    'roasted beans': 0.7,
+    'insect': 0.5,
+    'insect damaged': 0.5,
+    'broken': 0.2,
+    'broken/cut': 0.2,
+    'broken_cut': 0.2,
+    'cut': 0.2,
+    'good_beans': 0.0,
+    'good beans': 0.0,
+    'good bean': 0.0,
+  };
+
+  static const double _historyBaselineShelfLifeDays = 900.0; // ~30 months midpoint for clean beans
+  static const Map<String, double> _historyDefectReductions = {
+    'fully_black': 0.75,
+    'roasted': 0.833, // ~5 months target
+    'insect': 0.73,
+    'broken': 0.25,
+    'good_beans': 0.0,
+  };
+
+  String? _historyShelfLifeBucket(String? raw) {
+    if (raw == null) return null;
+    final norm = raw.toLowerCase().replaceAll(RegExp(r'[_-]+'), ' ').trim();
+    if (norm.contains('fully black') || norm.contains('full black') || norm.contains('black bean')) return 'fully_black';
+    if (norm.contains('roast')) return 'roasted';
+    if (norm.contains('insect')) return 'insect';
+    if (norm.contains('broken') || norm.contains('cut')) return 'broken';
+    if (norm.contains('good bean')) return 'good_beans';
+    return null;
+  }
+
+  double? _historyWeightedShelfLifeDays({
+    Map<String, dynamic>? typeCounts,
+    List<dynamic>? detections,
+  }) {
+    final Map<String, int> counts = {};
+
+    void bump(String? raw, int amount) {
+      final bucket = _historyShelfLifeBucket(raw);
+      if (bucket == null || amount <= 0) return;
+      counts[bucket] = (counts[bucket] ?? 0) + amount;
+    }
+
+    if (typeCounts != null) {
+      typeCounts.forEach((key, value) {
+        final int count = (value is num) ? value.toInt() : 0;
+        if (count > 0) bump(key?.toString(), count);
+      });
+    }
+
+    if (detections != null) {
+      for (final detection in detections) {
+        if (detection is! Map) continue;
+        final String? rawType = (detection['defect_type'] ?? detection['label'] ?? detection['class'] ?? detection['type'])
+            ?.toString();
+        bump(rawType, 1);
+      }
+    }
+
+    final int totalBeans = counts.values.fold(0, (prev, c) => prev + c);
+    if (totalBeans <= 0) return null;
+    final int fullyBlackCount = counts['fully_black'] ?? 0;
+    if (fullyBlackCount > totalBeans / 2) {
+      return 0.0;
+    }
+
+    double weightedSum = 0;
+    counts.forEach((key, value) {
+      final weight = _historyDefectWeights[key] ?? 0.0;
+      weightedSum += weight * value;
+    });
+
+    double reductionSum = 0;
+    counts.forEach((key, value) {
+      final reduction = _historyDefectReductions[key] ?? 0.3;
+      reductionSum += reduction * value;
+    });
+
+    final double avgReduction = (reductionSum / totalBeans).clamp(0.0, 0.9);
+    final double days =
+        (_historyBaselineShelfLifeDays * (1.0 - avgReduction)).clamp(0.0, _historyBaselineShelfLifeDays);
+    return days;
+  }
+
+  bool _historyIsGoodBean(String? defectType) {
+    if (defectType == null) return false;
+    final norm = defectType.toLowerCase().replaceAll(RegExp(r'[_-]+'), ' ').trim();
+    return norm.contains('good bean');
+  }
+
+  String _historyNormalizeDefectKey(String raw) {
+    return raw.toLowerCase().replaceAll(RegExp(r'[_-]+'), ' ').trim();
+  }
+
+  double _historyWeightedScore(List<dynamic> detections) {
+    double sum = 0;
+    int count = 0;
+    for (final d in detections) {
+      if (d is! Map) continue;
+      final String? t = (d['defect_type'] ?? d['label'] ?? d['class'] ?? d['type'])?.toString();
+      if (t == null) continue;
+      final norm = _historyNormalizeDefectKey(t);
+      if (_historyIsGoodBean(norm)) continue;
+      final double w =
+          _historyDefectWeights[norm] ?? _historyDefectWeights[norm.replaceAll(' ', '_')] ?? 0.3;
+      sum += w;
+      count += 1;
+    }
+    if (count == 0) return 0.0;
+    return (sum / count).clamp(0.0, 1.0);
+  }
+
+  double _historyBaseDays(String? beanType) {
+    final lower = beanType?.toLowerCase() ?? '';
+    if (lower.contains('arabica')) return _baseShelfLifeDaysHistory['arabica']!.toDouble();
+    if (lower.contains('liberica')) return _baseShelfLifeDaysHistory['liberica']!.toDouble();
+    if (lower.contains('excelsa')) return _baseShelfLifeDaysHistory['excelsa']!.toDouble();
+    if (lower.contains('robusta')) return _baseShelfLifeDaysHistory['robusta']!.toDouble();
+    return _baseShelfLifeDaysHistory['other']!.toDouble();
+  }
+
+  double? _historyOverrideDaysForRank(int rank) {
+    switch (rank) {
+      case 4:
+        return 0.0; // Fully black: discard immediately
+      case 3:
+        return 135.0; // Insect damage: ~3–6 months
+      case 2:
+        return 547.0; // Broken/Cut: ~1–2 years
+      case 1:
+        return 10.0; // Roasted/heat damaged: ~1–2 weeks
+      default:
+        return null;
+    }
+  }
+
+  double _historyShelfMultiplierFromDefectPct(double defectPct) {
+    final double score = (defectPct / 100.0).clamp(0.0, 1.0);
+    final double linear = 1.0 - (0.7 * score);
+    return linear.clamp(0.25, 1.0);
+  }
+
+  double? _recomputeLocalShelfLifeMonths(Map<String, dynamic> item) {
+    final Map<String, dynamic>? defectDetection = _resolveDefectDetection(Map<String, dynamic>.from(item));
+    final List<dynamic> detections = _extractDetections(defectDetection);
+    final Map<String, dynamic>? shelfCounts = item['defect_counts'] is Map
+        ? Map<String, dynamic>.from(item['defect_counts'] as Map)
+        : null;
+
+    final double weightedDays = _historyWeightedShelfLifeDays(
+          typeCounts: shelfCounts,
+          detections: detections,
+        ) ??
+        30.0;
+
+    return weightedDays / 30.0;
+  }
+
+
+  double _historyShelfMultiplierFromScore(double score) {
+    final double linear = 1.0 - (0.7 * score);
+    return linear.clamp(0.25, 1.0);
+  }
+
+  int _historyDefectRank(String? defectType) {
+    if (defectType == null) return 0;
+    final norm = defectType.toLowerCase().replaceAll(RegExp(r'[_-]+'), ' ').trim();
+    if (norm.contains('fully black') || norm.contains('full black') || norm.contains('black bean')) return 4;
+    if (norm.contains('insect')) return 3;
+    if (norm.contains('broken') || norm.contains('cut')) return 2;
+    if (norm.contains('roast')) return 1;
+    return 0;
+  }
+
+  int _historyHighestRank(List<dynamic> detections) {
+    int rank = 0;
+    for (final d in detections) {
+      if (d is! Map) continue;
+      final String? t = (d['defect_type'] ?? d['label'] ?? d['class'] ?? d['type'])?.toString();
+      rank = math.max(rank, _historyDefectRank(t));
+    }
+    return rank;
+  }
+
+  double? _historyRankOverrideDays(int rank) {
+    switch (rank) {
+      case 4:
+        return 360.0; // Fully black beans: 10–14 months (midpoint ≈12 months)
+      case 3:
+        return 420.0; // Insect damage: 12–16 months (midpoint ≈14 months)
+      case 2:
+        return 675.0; // Broken / Cut beans: 18–27 months (midpoint ≈22.5 months)
+      case 1:
+        return 10.0; // 1–2 weeks midpoint
+      default:
+        return null;
+    }
   }
 
   Map<String, dynamic>? _resolveDefectDetection(Map<String, dynamic> map) {

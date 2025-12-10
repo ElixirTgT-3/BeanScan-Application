@@ -15,6 +15,18 @@ import numpy as np
 
 from .defect_classifier_mobilenet import CoffeeNetCNN
 
+# Defect labels to ignore (excluded from scoring, severity, and returned detections)
+# Keep this limited to "clean" tokens so defects like quaker/nugget/shell still count.
+IGNORED_DEFECT_TYPES = {
+    'good_bean',
+    'goodbean',
+    'good',
+    'healthy',
+    'clean',
+    'background',
+    'no_defect',
+}
+
 class MobileNetV3Backbone(nn.Module):
     """Custom MobileNetV3 backbone for feature extraction - matches trained model architecture"""
     
@@ -302,241 +314,260 @@ class DefectDetectorFasterRCNN(nn.Module):
             return detections
 
 class RuleBasedShelfLife:
-    """Rule-based shelf life prediction based on defect analysis"""
-    
+    """Rule-based shelf life prediction matching RULE_BASED_SEVERITY.md banded logic."""
+
     def __init__(self):
-        # Defect severity weights (higher = more critical)
-        self.defect_weights = {
+        # Base shelf life (days) per bean type; matches the “Perfect green beans” table rows.
+        self.base_shelf_life_days = {
+            'arabica': 1095,    # 36.5 months (specialty)
+            'liberica': 1095,
+            'excelsa': 900,     # 30 months
+            'robusta': 720,     # 24 months (commodity)
+            'other': 1095,      # align unknown to the clean specialty baseline
+        }
+
+        # Defect severity weights (table-aligned; higher = worse)
+        self.defect_weights: Dict[str, float] = {
             'insect_damage': 8.0,
+            'insect': 8.0,
+            'borer': 8.0,
+            'quaker': 7.0,
+            'nugget': 5.0,
             'discoloration': 6.0,
             'physical_damage': 4.0,
-            'quaker': 7.0,
+            'broken': 4.0,
+            'broken_cut': 4.0,
+            'cut': 4.0,
+            'chip': 4.0,
+            'crack': 4.0,
             'shell': 3.0,
             'under_roast': 2.0,
-            'roasted-beans': 1.0,
-            'nugget': 5.0
+            'roasted_beans': 7.0,
+            'roasted-beans': 7.0,
+            'unknown': 1.0,
         }
-        
-        # Base shelf life by bean type (in days) -- modelled as multi-month storage
-        self.base_shelf_life = {
-            'Arabica': 240,   # ≈8 months
-            'Robusta': 210,   # ≈7 months
-            'Liberica': 225,  # ≈7.5 months
-            'Excelsa': 210,   # ≈7 months
-            'Other': 180      # ≈6 months fallback
+
+        # Scenario profiles (directly from the table)
+        self.scenario_profiles = {
+            'clean_specialty': {
+                'months_range': (24.0, 36.0),
+                'severity': 'normal',
+                'base_confidence': 0.95,
+            },
+            'clean_commodity': {
+                'months_range': (12.0, 24.0),
+                'severity': 'normal',
+                'base_confidence': 0.92,
+            },
+            'general_mixed': {
+                'months_range': (12.0, 24.0),
+                'severity': 'moderate',
+                'base_confidence': 0.82,
+                'reduction': (0.10, 0.60),
+            },
+            'fully_black': {
+                'months_range': (10.0, 14.0),
+                'severity': 'severe',
+                'base_confidence': 0.70,
+                'reduction': (0.40, 0.60),
+            },
+            'insect_damage': {
+                'months_range': (12.0, 16.0),
+                'severity': 'moderate',
+                'base_confidence': 0.75,
+                'reduction': (0.30, 0.50),
+            },
+            'broken_cut': {
+                'months_range': (18.0, 27.0),
+                'severity': 'mild',
+                'base_confidence': 0.82,
+                'reduction': (0.10, 0.25),
+            },
+            'roasted_defect': {
+                'months_range': (7.0, 12.0),
+                'severity': 'severe',
+                'base_confidence': 0.68,
+                'reduction': (0.50, 0.70),
+            },
         }
-        
-        # Severity bands (percentage ranges with peak values and scaling information)
-        self.severity_bands = [
-            {
-                'name': 'mild',
-                'percent_range': (0.0, 22.0),
-                'percent_peak': 8.0,
-                'month_edges': (0.60, 0.82),   # scale at range edges
-                'month_peak': 0.96,            # scale near peak
-                'confidence_edges': (0.78, 0.88),
-                'confidence_peak': 0.95,
-            },
-            {
-                'name': 'moderate',
-                'percent_range': (18.0, 78.0),
-                'percent_peak': 45.0,
-                'month_edges': (0.28, 0.52),
-                'month_peak': 0.62,
-                'confidence_edges': (0.42, 0.64),
-                'confidence_peak': 0.74,
-            },
-            {
-                'name': 'severe',
-                'percent_range': (70.0, 100.0),
-                'percent_peak': 90.0,
-                'month_edges': (0.08, 0.20),
-                'month_peak': 0.18,
-                'confidence_edges': (0.18, 0.38),
-                'confidence_peak': 0.5,
-            },
-        ]
-    
-    def predict_shelf_life(self, defect_sequence, bean_type='Arabica', confidence_threshold: float = 0.7):
-        """Predict shelf life based on defect analysis using rule-based approach"""
-        
-        # Handle different input formats
+
+        self.clean_tokens = set(IGNORED_DEFECT_TYPES)
+
+    def predict_shelf_life(self, defect_sequence, bean_type: str = 'Arabica', confidence_threshold: float = 0.7):
+        """
+        Predict shelf life using the table-driven scenarios:
+        clean / general mixed / fully black / insect damage / broken-cut / roasted-bean defect.
+        """
+        # Normalize inputs
         if isinstance(defect_sequence, list):
             defects = defect_sequence
         elif hasattr(defect_sequence, 'tolist'):
             defects = defect_sequence.tolist()
         else:
             defects = []
-        
-        # Start with base shelf life for the bean type
-        base_days = self.base_shelf_life.get(bean_type, self.base_shelf_life['Other'])
+
+        bean_key = (bean_type or 'other').strip().lower()
+        base_days = self.base_shelf_life_days.get(bean_key, self.base_shelf_life_days['other'])
         base_months = base_days / 30.0
-        predicted_days = base_days
-        
-        # Calculate defect impact
-        total_defect_score = 0
-        defect_counts = {}
+
+        total_defect_score = 0.0
+        defect_counts: Dict[str, int] = {}
         total_detected = 0
         cumulative_confidence = 0.0
-        
-        # Count and score defects
+
         for defect in defects:
             if isinstance(defect, dict):
                 defect_type = defect.get('type', 'unknown')
                 confidence = defect.get('confidence', 0.5)
                 count = defect.get('count', 1)
             else:
-                # Handle simple defect type strings
-                defect_type = str(defect).lower()
+                defect_type = str(defect)
                 confidence = 1.0
                 count = 1
-            
-            # Get defect weight
-            weight = self.defect_weights.get(defect_type, 1.0)
-            
-            # Calculate impact (weight * confidence * count)
-            impact = weight * confidence * count
-            total_defect_score += impact
-            
-            # Track defect counts
-            defect_counts[defect_type] = defect_counts.get(defect_type, 0) + count
-            total_detected += count
-            cumulative_confidence += confidence * count
-        
-        avg_detection_confidence = (cumulative_confidence / total_detected) if total_detected > 0 else 0.0
-        
-        # Translate raw defect score into a 0-100% indicator
-        normalized_score = min(total_defect_score / 45.0, 1.5)  # allow slight spillover for severe cases
-        defect_percentage = max(0.0, min(100.0, normalized_score * 100.0))
-        
-        band = self._select_severity_band(defect_percentage)
-        severity = band['name']
-        percent_low, percent_high = band['percent_range']
-        span = band['span']
-        severity_position = min(1.0, max(0.0, (defect_percentage - percent_low) / span))
-        peak_position = band['peak_position']
-        
-        edge_low, edge_high = band['month_edges']
-        peak_scale = band['month_peak']
 
-        severity_scale = self._interpolate_with_peak(
-            severity_position,
-            peak_position,
-            edge_low,
-            edge_high,
-            peak_scale,
-        )
-        predicted_months = max(0.1, base_months * severity_scale)
+            norm_type = self._normalize_defect_key(defect_type)
+            if norm_type in self.clean_tokens:
+                continue
+
+            weight = self.defect_weights.get(norm_type, self.defect_weights['unknown'])
+            impact = weight * float(confidence) * float(count)
+            total_defect_score += impact
+            defect_counts[norm_type] = defect_counts.get(norm_type, 0) + int(count)
+            total_detected += int(count)
+            cumulative_confidence += float(confidence) * float(count)
+
+        avg_detection_confidence = (cumulative_confidence / total_detected) if total_detected > 0 else 0.0
+        normalized_score = min(total_defect_score / 45.0, 1.5)
+        defect_percentage = self._clamp(normalized_score * 100.0, 0.0, 100.0)
+
+        # Clean / normal branch
+        if total_detected == 0 or defect_percentage <= 0:
+            estimated_months = round(base_months, 1)
+            return {
+                'predicted_days': int(base_days),
+                'estimated_months': estimated_months,
+                'estimated_months_range': {'min': estimated_months, 'max': estimated_months},
+                'base_shelf_life': int(base_days),
+                'category': 'normal',
+                'quality_grade': 'Grade A',
+                'severity': 'normal',
+                'severity_position': 0.0,
+                'confidence': 0.95,
+                'defect_percentage': 0.0,
+                'defect_score': round(total_defect_score, 3),
+                'defect_counts': defect_counts,
+                'defect_categories': {},
+                'total_defects_detected': total_detected,
+                'average_detection_confidence': round(avg_detection_confidence, 3),
+                'raw_prediction': base_days,
+                'profile_used': 'clean',
+            }
+
+        scenario_key = self._select_scenario(defect_counts, total_detected, bean_key)
+        profile = self.scenario_profiles.get(scenario_key, self.scenario_profiles['general_mixed'])
+        months_min, months_max = profile['months_range']
+        severity = profile['severity']
+
+        # Adjust range for bean grade on clean rows
+        if scenario_key.startswith('clean'):
+            if bean_key in ('arabica', 'liberica', 'excelsa'):
+                months_min, months_max = 24.0, 36.0
+            else:
+                months_min, months_max = 12.0, 24.0
+
+        # Intensity drives position toward the lower end
+        intensity = self._clamp(defect_percentage / 100.0, 0.0, 1.0)
+        position = self._clamp(0.25 + 0.7 * intensity, 0.0, 1.0)
+        predicted_months = months_max - (months_max - months_min) * position
+        predicted_months = max(0.1, predicted_months)
         predicted_days = int(predicted_months * 30)
-        
-        # Additional guard rails for extreme insect damage
-        if defect_counts.get('insect_damage', 0) > 2:
-            predicted_months = min(predicted_months, base_months * 0.2)
+
+        # Special guard for roasted defect: enforce heavy reduction
+        if scenario_key == 'roasted_defect':
+            cap = months_max * 0.5
+            predicted_months = min(predicted_months, cap)
             predicted_days = int(predicted_months * 30)
-        
-        predicted_days = max(0, predicted_days)
-        
-        confidence = self._interpolate_with_peak(
-            severity_position,
-            peak_position,
-            band['confidence_edges'][0],
-            band['confidence_edges'][1],
-            band['confidence_peak'],
-        )
-        
+
+        # Confidence
+        confidence = profile.get('base_confidence', 0.8)
+        confidence -= 0.15 * position
+        if total_detected > 1:
+            confidence -= min(0.08, 0.01 * (total_detected - 1))
         if total_detected:
-            confidence -= min(0.18, (total_detected - 1) * 0.02)
             confidence *= (0.85 + 0.15 * avg_detection_confidence)
-        
-        confidence = max(0.2, min(0.96, confidence))
-        
-        months_scale_candidates = [edge_low, edge_high, peak_scale, severity_scale]
-        valid_scales = [s for s in months_scale_candidates if s is not None]
-        months_min = max(0.1, base_months * min(valid_scales))
-        months_max = max(months_min, base_months * max(valid_scales))
-        
-        # Categorise shelf life and quality grade
-        if severity == "mild":
-            category = "Excellent"
-            quality_grade = "Grade A"
-        elif severity == "moderate":
-            category = "Warning" if defect_percentage > 40 else "Good"
-            quality_grade = "Grade B" if defect_percentage <= 30 else "Grade C"
-        else:
-            category = "Critical"
-            quality_grade = "Grade D"
-        
-        # Ensure confidence thresholding behaviour
+        confidence = self._clamp(confidence, 0.2, 0.96)
         if confidence < confidence_threshold:
-            category = "Uncertain"
-            confidence = max(0.15, confidence_threshold - 0.05)
-        
+            confidence = max(confidence, confidence_threshold - 0.05)
+            category_label = 'Uncertain'
+        else:
+            category_label = 'Excellent' if severity == 'mild' or severity == 'normal' else (
+                'Good' if severity == 'moderate' and defect_percentage <= 40 else
+                'Warning' if severity == 'moderate' else 'Critical'
+            )
+
+        quality_grade = 'Grade A'
+        if severity == 'moderate':
+            quality_grade = 'Grade B' if defect_percentage <= 40 else 'Grade C'
+        elif severity == 'severe':
+            quality_grade = 'Grade D'
+
+        severity_position = position
+        est_range_min = round(months_min, 1)
+        est_range_max = round(months_max, 1)
+
         return {
-            'predicted_days': max(0, int(predicted_days)),
-            'category': category,
-            'confidence': round(min(0.96, confidence), 4),
-            'raw_prediction': predicted_months * 30,
-            'defect_score': round(total_defect_score, 3),
-            'defect_counts': defect_counts,
-            'defect_percentage': round(defect_percentage, 1),
-            'average_detection_confidence': round(avg_detection_confidence, 3),
-            'total_defects_detected': total_detected,
+            'predicted_days': int(predicted_days),
+            'estimated_months': round(predicted_months, 1),
+            'estimated_months_range': {'min': est_range_min, 'max': est_range_max},
+            'base_shelf_life': int(base_days),
+            'category': category_label,
+            'quality_grade': quality_grade,
             'severity': severity,
             'severity_position': round(severity_position, 3),
-            'estimated_months': round(predicted_months, 1),
-            'estimated_months_range': {
-                'min': round(months_min, 1),
-                'max': round(months_max, 1)
-            },
-            'quality_grade': quality_grade,
-            'base_shelf_life': base_days
+            'confidence': round(confidence, 4),
+            'defect_percentage': round(defect_percentage, 1),
+            'defect_score': round(total_defect_score, 3),
+            'defect_counts': defect_counts,
+            'defect_categories': {},  # scenario-based; not breaking out here
+            'total_defects_detected': total_detected,
+            'average_detection_confidence': round(avg_detection_confidence, 3),
+            'raw_prediction': predicted_days,
+            'profile_used': scenario_key,
         }
 
-    def _select_severity_band(self, percentage: float) -> dict:
-        # Choose the first band containing the percentage; if none, pick the closest by range distance.
-        for band in self.severity_bands:
-            low, high = band['percent_range']
-            if low <= percentage <= high:
-                return self._prepare_band(band)
+    def _normalize_defect_key(self, defect_type: str) -> str:
+        return str(defect_type or '').strip().lower().replace('-', '_').replace(' ', '_')
 
-        # Fallback: choose band whose range midpoint is closest to percentage
-        def distance(b):
-            low, high = b['percent_range']
-            midpoint = (low + high) / 2
-            return abs(percentage - midpoint)
+    def _select_scenario(self, defect_counts: Dict[str, int], total_detected: int, bean_key: str) -> str:
+        if total_detected == 0:
+            return 'clean_specialty' if bean_key in ('arabica', 'liberica', 'excelsa') else 'clean_commodity'
 
-        band = min(self.severity_bands, key=distance)
-        return self._prepare_band(band)
+        def has(key):
+            return defect_counts.get(key, 0) > 0
 
-    def _prepare_band(self, band: dict) -> dict:
-        prepared = dict(band)
-        low, high = prepared['percent_range']
-        span = max(1.0, high - low)
-        peak = prepared['percent_peak']
-        peak_position = (peak - low) / span
-        prepared['span'] = span
-        prepared['peak_position'] = min(1.0, max(0.0, peak_position))
-        return prepared
+        # Roasted-bean defect dominates
+        roasted = has('roasted_beans') or has('roasted-beans')
+        black = any(k for k in defect_counts if 'black' in k and defect_counts.get(k, 0) > 0)
+        insect = has('insect_damage') or has('insect') or has('borer')
+        broken = any(k for k in defect_counts if any(token in k for token in ('broken', 'cut', 'chip', 'crack', 'physical')) and defect_counts.get(k, 0) > 0)
 
-    def _interpolate_with_peak(self, position: float, peak_position: float, edge_low: float, edge_high: float, peak_value: float) -> float:
-        position = min(1.0, max(0.0, position))
-        peak_position = min(1.0, max(0.0, peak_position))
+        categories_present = sum(1 for flag in (roasted, black, insect, broken) if flag)
 
-        if peak_position == 0.0:
-            # Avoid division by zero, fall back to edge_high trajectory
-            return peak_value + (edge_high - peak_value) * position
-        if peak_position == 1.0:
-            return edge_low + (peak_value - edge_low) * position
+        if roasted:
+            return 'roasted_defect'
+        if categories_present > 1:
+            return 'general_mixed'
+        if black:
+            return 'fully_black'
+        if insect:
+            return 'insect_damage'
+        if broken:
+            return 'broken_cut'
+        return 'general_mixed'
 
-        if position <= peak_position:
-            t = position / peak_position
-            return edge_low + (peak_value - edge_low) * t
-        else:
-            denom = (1.0 - peak_position)
-            if denom <= 0.0:
-                return peak_value
-            t = (position - peak_position) / denom
-            return peak_value + (edge_high - peak_value) * t
+    @staticmethod
+    def _clamp(value: float, min_v: float, max_v: float) -> float:
+        return max(min_v, min(max_v, value))
 
 class BeanScanEnsemble(nn.Module):
     """Ensemble model combining CNN, Mask R-CNN, and Rule-based Shelf Life"""
@@ -558,7 +589,14 @@ class BeanScanEnsemble(nn.Module):
         results['bean_classification'] = bean_type
         
         # 2. Defect detection
-        defects = self.defect_model.detect_defects(image)
+        raw_defects = self.defect_model.detect_defects(image)
+        # Filter out ignored defect types
+        defects = []
+        for defect in raw_defects:
+            defect_type = (defect.get('defect_type') or '').lower() if isinstance(defect, dict) else ''
+            if defect_type and defect_type in IGNORED_DEFECT_TYPES:
+                continue
+            defects.append(defect)
         results['defect_detection'] = defects
         
         # 3. Shelf life prediction (always compute; derive sequence from defects when not provided)
@@ -618,23 +656,8 @@ class BeanScanEnsemble(nn.Module):
         }
     
     def _get_health_grade(self, score):
-        """Convert health score to letter grade"""
-        if score >= 0.9:
-            return 'A+'
-        elif score >= 0.8:
-            return 'A'
-        elif score >= 0.7:
-            return 'B+'
-        elif score >= 0.6:
-            return 'B'
-        elif score >= 0.5:
-            return 'C+'
-        elif score >= 0.4:
-            return 'C'
-        elif score >= 0.3:
-            return 'D'
-        else:
-            return 'F'
+        """Health grade simplified to a single neutral label (no letter grading)"""
+        return 'ungraded'
 
 def _load_defect_class_names(weights_path: Path) -> List[str]:
     default_classes = [

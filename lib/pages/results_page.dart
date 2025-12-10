@@ -141,10 +141,28 @@ class ResultsPage extends StatelessWidget {
       final now = DateTime.now();
       final dateLabel =
           '${now.month.toString().padLeft(2, '0')}/${now.day.toString().padLeft(2, '0')}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
-      final shelfLifeData =
+      Map<String, dynamic>? shelfLifeData =
           shelfLife != null ? Map<String, dynamic>.from(shelfLife!) : null;
       final defectSummary = _getDefectSummary();
       final detections = _getDetections();
+      final bool hasGoodBeansOnly =
+          _hasGoodBeans(detections) && ((defectSummary?['total_defects'] as num? ?? 0) == 0);
+      if (hasGoodBeansOnly) {
+        const double fallbackDays = 1095.0;
+        final double fallbackMonths = double.parse((fallbackDays / 30.0).toStringAsFixed(1));
+        shelfLifeData ??= {};
+        final double? currentDays = _asDouble(shelfLifeData['predicted_days']);
+        final double? currentMonths = _asDouble(shelfLifeData['estimated_months']);
+        if (currentDays == null || currentDays <= 0) {
+          shelfLifeData['predicted_days'] = fallbackDays;
+        }
+        if (currentMonths == null || currentMonths <= 0) {
+          shelfLifeData['estimated_months'] = fallbackMonths;
+        }
+        shelfLifeData.putIfAbsent('base_shelf_life', () => fallbackDays);
+        shelfLifeData.putIfAbsent('category', () => 'Excellent');
+        shelfLifeData.putIfAbsent('severity', () => 'normal');
+      }
       final probabilityEntries = prediction.allProbabilities.entries.toList()
         ..sort((a, b) => b.value.compareTo(a.value));
 
@@ -268,10 +286,16 @@ class ResultsPage extends StatelessWidget {
             }
 
             if (shelfLifeData != null && shelfLifeData.isNotEmpty) {
-              final double? predictedDays =
-                  (shelfLifeData['predicted_days'] as num?)?.toDouble();
-              final double? estimatedMonths =
-                  (shelfLifeData['estimated_months'] as num?)?.toDouble();
+              final double? predictedDaysRaw = _asDouble(shelfLifeData['predicted_days']);
+              final double? weightedDays = _weightedShelfLifeDays(
+                typeCounts: defectSummary?['defect_types'] as Map<String, dynamic>?,
+                detections: detections,
+              );
+              double predictedDays = weightedDays ??
+                  (predictedDaysRaw != null && predictedDaysRaw > 0
+                      ? predictedDaysRaw
+                      : 30.0);
+              double? estimatedMonths = double.parse((predictedDays / 30.0).toStringAsFixed(1));
               final Map<String, dynamic>? monthsRange =
                   shelfLifeData['estimated_months_range'] is Map
                       ? Map<String, dynamic>.from(
@@ -285,11 +309,14 @@ class ResultsPage extends StatelessWidget {
                               shelfLifeData['confidence']) as num)
                           .toDouble()
                       : null;
+              final String severityLabelPdf =
+                  (shelfLifeData['severity'] as String?) ?? (defectSummary?['severity'] as String?) ?? 'normal';
               final String status = _resolveStatus(
-                category: shelfLifeData['category'] as String?,
-                severity: (shelfLifeData['severity'] as String?) ??
-                    (defectSummary?['severity'] as String?),
-                predictedDays: shelfLifeData['predicted_days'] as num?,
+                category: (shelfLifeData['category'] as String?) ??
+                    _deriveShelfLifeCategory({'predicted_days': predictedDays}),
+                severity: severityLabelPdf,
+                predictedDays: predictedDays,
+                baseDays: weightedDays ?? predictedDaysRaw ?? 30.0,
               );
 
               widgets.add(pw.SizedBox(height: 18));
@@ -1194,28 +1221,56 @@ class ResultsPage extends StatelessWidget {
     final Map<String, dynamic>? shelfLifeData = shelfLife != null
         ? Map<String, dynamic>.from(shelfLife!)
         : null;
-    double? predictedDays = _asDouble(shelfLifeData?['predicted_days']);
-    double? estimatedMonths = _asDouble(shelfLifeData?['estimated_months']);
-    if (estimatedMonths == null && predictedDays != null && predictedDays > 0) {
-      estimatedMonths = double.parse((predictedDays / 30.0).toStringAsFixed(1));
-    }
+    final Map<String, dynamic>? defectSummary = _getDefectSummary();
+    final List<dynamic> detectionsAll = _getDetections();
+    final double? predictedDaysRaw = _asDouble(shelfLifeData?['predicted_days']);
+    final List<dynamic> detectionsForAdjustment = _filterOutGoodBeanDetections(detectionsAll);
+    final int highestRankForShelf = math.max(
+      _highestDefectTypeRank(detectionsForAdjustment),
+      _highestDefectTypeRankFromMap(defectSummary?['defect_types']),
+    );
+    final double? weightedDays = _weightedShelfLifeDays(
+      typeCounts: defectSummary?['defect_types'] as Map<String, dynamic>?,
+      detections: detectionsAll,
+    );
+    double predictedDays = weightedDays ??
+        (predictedDaysRaw != null && predictedDaysRaw > 0 ? predictedDaysRaw : 30.0);
+    double? estimatedMonths = double.parse((predictedDays / 30.0).toStringAsFixed(1));
     final Map<String, dynamic>? monthsRange = _normalizeMonthsRange(
       shelfLifeData?['estimated_months_range'] is Map
           ? Map<String, dynamic>.from(shelfLifeData!['estimated_months_range'] as Map)
           : null,
       estimatedMonths,
     );
+    String? severityLabel = (defectSummary?['severity'] as String?) ?? (shelfLifeData?['severity'] as String?);
+    double defectPct =
+        _asDouble(defectSummary?['defect_percentage']) ?? _asDouble(shelfLifeData?['defect_percentage']) ?? 0.0;
+    if (defectPct <= 0 && detectionsForAdjustment.isNotEmpty) {
+      defectPct = _estimateDefectPercentageFromDetections(detectionsForAdjustment) ?? 0.0;
+    }
     final int predictedDaysDisplay =
         (predictedDays ?? _asDouble(shelfLifeData?['predicted_days']) ?? 0).round();
-    final Map<String, dynamic>? defectSummary = _getDefectSummary();
-    final String? severityLabel = (shelfLifeData?['severity'] as String?) ?? (defectSummary?['severity'] as String?);
+    String shelfLifeCategory = _deriveShelfLifeCategory({'predicted_days': predictedDays});
     final double confidenceScore = shelfLifeData != null
         ? (_asDouble(shelfLifeData['confidence_score'] ?? shelfLifeData['confidence']) ?? 0.0)
         : (healthyPct / 100.0);
+    const bool hasGoodBeansOnly = false;
+    final Map<int, int> rankCountMap = _rankCounts(
+      typeCounts: defectSummary?['defect_types'] as Map<String, dynamic>?,
+      detections: detectionsForAdjustment,
+    );
+    final int highestRankCount = rankCountMap[highestRankForShelf] ?? 0;
+    final String defectCategoryLabel = _defectCategoryLabel(
+      highestRankForShelf,
+      goodBeansOnly: hasGoodBeansOnly,
+      count: highestRankCount,
+    );
+    final List<String> detectionRecommendations = _recommendationsForDetections(detectionsAll);
     final String statusLabel = _resolveStatus(
-      category: shelfLifeData?['category'] as String?,
+      category: shelfLifeCategory,
       severity: severityLabel,
       predictedDays: predictedDays,
+      baseDays: weightedDays ?? predictedDaysRaw ?? 30.0,
     );
     final onSurface = colorScheme.onSurface;
     final surface = colorScheme.surface;
@@ -1225,7 +1280,7 @@ class ResultsPage extends StatelessWidget {
     final dividerColor = isDark ? colorScheme.outline.withValues(alpha: 0.3) : AppColors.dividerGrey;
     final chipBackground = _getShelfLifeColor(
       colorScheme,
-      (shelfLife?['category'] as String?) ?? _deriveShelfLifeCategory(shelfLife ?? {}),
+      shelfLifeCategory,
     );
 
     return Container(
@@ -1284,7 +1339,7 @@ class ResultsPage extends StatelessWidget {
           const SizedBox(height: 8),
 
           // Shelf Life Days
-          if (shelfLife != null) ...[
+          if (shelfLife != null || predictedDays != null) ...[
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -1309,6 +1364,52 @@ class ResultsPage extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Recommendation:',
+                style: TextStyle(fontWeight: FontWeight.w500, color: primaryTextColor.withValues(alpha: 0.75)),
+              ),
+              Flexible(
+                child: Text(
+                  detectionRecommendations.isNotEmpty ? 'See numbered list' : defectCategoryLabel,
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: primaryTextColor,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (detectionRecommendations.isNotEmpty) ...[
+            Text(
+              'Numbered Recommendations:',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: primaryTextColor.withValues(alpha: 0.8),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: detectionRecommendations
+                  .map((rec) => Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          rec,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w500,
+                            color: primaryTextColor,
+                          ),
+                        ),
+                      ))
+                  .toList(),
+            ),
+            const SizedBox(height: 8),
+          ],
           if (estimatedMonths != null) ...[
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1516,9 +1617,400 @@ class ResultsPage extends StatelessWidget {
   }
 
   String _computeSeverityFromPercentage(double percentage) {
+    if (percentage <= 0) return 'normal';
     if (percentage < 22) return 'mild';
     if (percentage < 78) return 'moderate';
     return 'severe';
+  }
+
+  static const Map<String, int> _baseShelfLifeDays = {
+    'arabica': 900, // 30 months baseline
+    'liberica': 840, // 28 months baseline
+    'excelsa': 780, // 26 months baseline
+    'robusta': 750, // 25 months baseline
+    'other': 600, // 20 months baseline
+  };
+
+  static const Map<String, double> _defectWeights = {
+    'fully black': 1.0,
+    'fully_black': 1.0,
+    'black bean': 1.0,
+    'roasted': 0.7,
+    'roasted beans': 0.7,
+    'insect': 0.5,
+    'insect damaged': 0.5,
+    'broken': 0.2,
+    'broken/cut': 0.2,
+    'broken_cut': 0.2,
+    'cut': 0.2,
+    'good_beans': 0.0,
+    'good beans': 0.0,
+    'good bean': 0.0,
+  };
+
+  static const double _baselineShelfLifeDays = 900.0; // ~30 months midpoint for clean beans
+  static const Map<String, double> _defectReductions = {
+    'fully_black': 0.75, // 40–60%+ drop -> increased to 75%
+    'roasted': 0.833, // target ~5 months (≈150 days) from 900-day baseline
+    'insect': 0.73, // target ~8 months (≈240 days) from 900-day baseline
+    'broken': 0.25, // 10–25% drop -> use 25%
+    'good_beans': 0.0,
+  };
+
+  String? _normalizeShelfLifeBucket(String? raw) {
+    if (raw == null) return null;
+    final normalized = raw
+        .toLowerCase()
+        .replaceAll(RegExp(r'[_-]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (normalized.contains('fully black') || normalized.contains('full black') || normalized.contains('black bean')) {
+      return 'fully_black';
+    }
+    if (normalized.contains('roast')) return 'roasted';
+    if (normalized.contains('insect')) return 'insect';
+    if (normalized.contains('broken') || normalized.contains('cut')) return 'broken';
+    if (normalized.contains('good bean')) return 'good_beans';
+    return null;
+  }
+
+  double? _weightedShelfLifeDays({Map<String, dynamic>? typeCounts, List<dynamic>? detections}) {
+    final Map<String, int> counts = {};
+
+    void bump(String? raw, int amount) {
+      final bucket = _normalizeShelfLifeBucket(raw);
+      if (bucket == null || amount <= 0) return;
+      counts[bucket] = (counts[bucket] ?? 0) + amount;
+    }
+
+    if (typeCounts != null) {
+      typeCounts.forEach((key, value) {
+        final int count = (value is num) ? value.toInt() : 0;
+        if (count > 0) bump(key?.toString(), count);
+      });
+    }
+
+    if (detections != null) {
+      for (final detection in detections) {
+        if (detection is! Map) continue;
+        final String? rawType = (detection['defect_type'] ??
+                detection['label'] ??
+                detection['class'] ??
+                detection['type'])
+            ?.toString();
+        bump(rawType, 1);
+      }
+    }
+
+    final int totalBeans = counts.values.fold(0, (prev, c) => prev + c);
+    if (totalBeans <= 0) return null;
+    final int fullyBlackCount = counts['fully_black'] ?? 0;
+    if (fullyBlackCount > totalBeans / 2) {
+      return 0.0;
+    }
+
+    double weightedSum = 0;
+    counts.forEach((key, value) {
+      final weight = _defectWeights[key] ?? 0.0;
+      weightedSum += weight * value;
+    });
+
+    double reductionSum = 0;
+    counts.forEach((key, value) {
+      final reduction = _defectReductions[key] ?? 0.3;
+      reductionSum += reduction * value;
+    });
+
+    final double avgReduction = (reductionSum / totalBeans).clamp(0.0, 0.9);
+    final double days = (_baselineShelfLifeDays * (1.0 - avgReduction)).clamp(0.0, _baselineShelfLifeDays);
+    return days;
+  }
+
+  int _defectTypeRank(String? defectType) {
+    if (defectType == null) return 0;
+    final normalized = defectType
+        .toLowerCase()
+        .replaceAll(RegExp(r'[_-]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (normalized.contains('fully black') || normalized.contains('full black') || normalized.contains('black bean')) {
+      return 4;
+    }
+    if (normalized.contains('insect')) return 3;
+    if (normalized.contains('broken') || normalized.contains('cut')) return 2;
+    if (normalized.contains('roast')) return 1;
+    return 0;
+  }
+
+  int _highestDefectTypeRank(Iterable<dynamic> detections) {
+    int highest = 0;
+    for (final detection in detections) {
+      if (detection is! Map) continue;
+      final String? defectType = (detection['defect_type'] ??
+              detection['label'] ??
+              detection['class'] ??
+              detection['type'])
+          ?.toString();
+      highest = math.max(highest, _defectTypeRank(defectType));
+    }
+    return highest;
+  }
+
+  int _highestDefectTypeRankFromMap(dynamic defectTypes) {
+    if (defectTypes is! Map) return 0;
+    int highest = 0;
+    defectTypes.forEach((key, _) {
+      highest = math.max(highest, _defectTypeRank(key?.toString()));
+    });
+    return highest;
+  }
+
+  double _severityFloorPct(int rank) {
+    switch (rank) {
+      case 4:
+        return 85.0;
+      case 3:
+        return 65.0;
+      case 2:
+        return 45.0;
+      case 1:
+        return 20.0;
+      default:
+        return 0.0;
+    }
+  }
+
+  String? _severityLabelForRank(int rank) {
+    switch (rank) {
+      case 4:
+        return 'severe';
+      case 3:
+        return 'moderate';
+      case 2:
+        return 'mild';
+      case 1:
+        return 'mild';
+      default:
+        return null;
+    }
+  }
+
+  bool _isGoodBeansType(String? defectType) {
+    if (defectType == null) return false;
+    final normalized = defectType
+        .toLowerCase()
+        .replaceAll(RegExp(r'[_-]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return normalized.contains('good bean');
+  }
+
+  String _normalizeDefectKey(String raw) {
+    return raw
+        .toLowerCase()
+        .replaceAll(RegExp(r'[_-]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  double _weightedDefectScore({Map<String, dynamic>? typeCounts, List<dynamic>? detections}) {
+    double weightedSum = 0;
+    int totalCount = 0;
+
+    if (typeCounts != null) {
+      typeCounts.forEach((key, value) {
+        final normalizedKey = _normalizeDefectKey(key.toString());
+        if (_isGoodBeansType(normalizedKey)) return;
+        final int count = (value is num) ? value.toInt() : 0;
+        if (count <= 0) return;
+        final double weight = _defectWeights[normalizedKey] ?? _defectWeights[normalizedKey.replaceAll(' ', '_')] ?? 0.3;
+        weightedSum += count * weight;
+        totalCount += count;
+      });
+    }
+
+    if (detections != null) {
+      for (final detection in detections) {
+        if (detection is! Map) continue;
+        final String? rawType = (detection['defect_type'] ?? detection['label'] ?? detection['class'] ?? detection['type'])
+            ?.toString();
+        if (rawType == null) continue;
+        final normalizedKey = _normalizeDefectKey(rawType);
+        if (_isGoodBeansType(normalizedKey)) continue;
+        final double weight = _defectWeights[normalizedKey] ?? _defectWeights[normalizedKey.replaceAll(' ', '_')] ?? 0.3;
+        weightedSum += weight;
+        totalCount += 1;
+      }
+    }
+
+    if (totalCount == 0) return 0.0;
+    final double score = weightedSum / totalCount;
+    return score.clamp(0.0, 1.0);
+  }
+
+  double _shelfLifeMultiplierFromScore(double score) {
+    // Linear decay: at score=0 -> 1.0x, score=1 -> 0.3x (floor 0.25)
+    final double linear = 1.0 - (0.7 * score);
+    return linear.clamp(0.25, 1.0);
+  }
+
+  int _baseShelfLifeDaysForBean(String beanType) {
+    final lower = beanType.toLowerCase();
+    if (lower.contains('arabica')) return _baseShelfLifeDays['arabica']!;
+    if (lower.contains('liberica')) return _baseShelfLifeDays['liberica']!;
+    if (lower.contains('excelsa')) return _baseShelfLifeDays['excelsa']!;
+    if (lower.contains('robusta')) return _baseShelfLifeDays['robusta']!;
+    return _baseShelfLifeDays['other']!;
+  }
+
+  int _defectRankForType(String? defectType) {
+    return _defectTypeRank(defectType);
+  }
+
+  Map<int, int> _rankCounts({
+    Map<String, dynamic>? typeCounts,
+    List<dynamic>? detections,
+  }) {
+    final Map<int, int> counts = {};
+
+    if (typeCounts != null) {
+      typeCounts.forEach((key, value) {
+        final normalizedKey = _normalizeDefectKey(key.toString());
+        if (_isGoodBeansType(normalizedKey)) return;
+        final int rank = _defectRankForType(normalizedKey);
+        final int count = (value is num) ? value.toInt() : 0;
+        if (count > 0) {
+          counts[rank] = (counts[rank] ?? 0) + count;
+        }
+      });
+    }
+
+    if (detections != null) {
+      for (final detection in detections) {
+        if (detection is! Map) continue;
+        final String? rawType = (detection['defect_type'] ?? detection['label'] ?? detection['class'] ?? detection['type'])
+            ?.toString();
+        if (rawType == null) continue;
+        final normalizedKey = _normalizeDefectKey(rawType);
+        if (_isGoodBeansType(normalizedKey)) continue;
+        final int rank = _defectRankForType(normalizedKey);
+        counts[rank] = (counts[rank] ?? 0) + 1;
+      }
+    }
+
+    return counts;
+  }
+
+  String _recommendationTextForType(String defectType) {
+    final normalized = _normalizeDefectKey(defectType);
+    if (_isGoodBeansType(normalized)) return 'Store properly and use';
+    if (normalized.contains('fully black') || normalized.contains('full black') || normalized.contains('black bean')) {
+      return 'Discard immediately';
+    }
+    if (normalized.contains('insect')) return 'Sort out or reject';
+    if (normalized.contains('broken') || normalized.contains('cut')) return 'Use with care; roast separately';
+    if (normalized.contains('roast')) return 'Remove before roasting / already roasted';
+    return 'Normal';
+  }
+
+  List<String> _recommendationsForDetections(List<dynamic> detections) {
+    final Map<String, Map<String, dynamic>> recMap = {};
+    for (int i = 0; i < detections.length; i++) {
+      final detection = detections[i];
+      if (detection is! Map) continue;
+      final String defectType =
+          (detection['defect_type'] ?? detection['label'] ?? detection['class'] ?? detection['type'] ?? 'unknown')
+              .toString();
+      final String normalized = _normalizeDefectKey(defectType);
+      final String rec = _recommendationTextForType(defectType);
+      recMap.putIfAbsent(rec, () => {'count': 0, 'positions': <int>[]});
+      recMap[rec]!['count'] = (recMap[rec]!['count'] as int) + 1;
+      (recMap[rec]!['positions'] as List<int>).add(i + 1); // overlay numbering is 1-based index
+    }
+
+    int idx = 1;
+    final List<String> lines = [];
+    recMap.forEach((rec, data) {
+      final int count = data['count'] as int;
+      final List<int> positions = List<int>.from(data['positions'] as List);
+      positions.sort();
+      final String posLabel = positions.isNotEmpty ? 'items: ${positions.join(', ')}' : '';
+      lines.add('${idx++}: $rec (count: $count${posLabel.isNotEmpty ? ', $posLabel' : ''})');
+    });
+    return lines;
+  }
+
+  int _defectDisplayNumber(int rank, {bool goodBeansOnly = false}) {
+    if (goodBeansOnly) return 5;
+    switch (rank) {
+      case 4:
+        return 1;
+      case 3:
+        return 2;
+      case 2:
+        return 3;
+      case 1:
+        return 4;
+      default:
+        return 0;
+    }
+  }
+
+  String _defectCategoryLabel(int rank, {bool goodBeansOnly = false, int count = 0}) {
+    final int displayNumber = _defectDisplayNumber(rank, goodBeansOnly: goodBeansOnly);
+    String recommendation;
+    if (goodBeansOnly) {
+      recommendation = 'Store properly and use';
+    } else {
+      switch (rank) {
+        case 4:
+          recommendation = 'Discard immediately';
+          break;
+        case 3:
+          recommendation = 'Sort out or reject';
+          break;
+        case 2:
+          recommendation = 'Use with care; roast separately';
+          break;
+        case 1:
+          recommendation = 'Remove before roasting / already roasted';
+          break;
+        default:
+          recommendation = 'Normal';
+          break;
+      }
+    }
+    final String countSuffix = count > 0 ? ' (count: $count)' : '';
+    return displayNumber > 0 ? '$displayNumber: $recommendation$countSuffix' : '$recommendation$countSuffix';
+  }
+
+  bool _hasGoodBeans(Iterable<dynamic> detections) {
+    for (final detection in detections) {
+      if (detection is! Map) continue;
+      final String? defectType = (detection['defect_type'] ??
+              detection['label'] ??
+              detection['class'] ??
+              detection['type'])
+          ?.toString();
+      if (_isGoodBeansType(defectType)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  List<dynamic> _filterOutGoodBeanDetections(Iterable<dynamic> detections) {
+    return detections
+        .where((detection) {
+          if (detection is! Map) return true;
+          final String? defectType = (detection['defect_type'] ??
+                  detection['label'] ??
+                  detection['class'] ??
+                  detection['type'])
+              ?.toString();
+          return !_isGoodBeansType(defectType);
+        })
+        .toList();
   }
 
   double? _asDouble(dynamic value) {
@@ -1569,15 +2061,23 @@ class ResultsPage extends StatelessWidget {
     return '$estimateLabel mo';
   }
 
-  String _resolveStatus({String? category, String? severity, num? predictedDays}) {
+  String _resolveStatus({String? category, String? severity, num? predictedDays, num? baseDays}) {
     String? normalizedSeverity = _normalizeSeverityTag(severity);
     final String? rawCategory = category?.trim().isNotEmpty == true ? category!.trim() : null;
     final String? normalizedCategory = _normalizeSeverityTag(rawCategory);
 
     if ((normalizedSeverity == null || normalizedSeverity.isEmpty) && predictedDays != null) {
-      final double predicted = predictedDays.toDouble();
-      final double normalizedPct = predicted > 0 ? (predicted / 240.0) * 100.0 : 0;
-      normalizedSeverity = _computeSeverityFromPercentage(normalizedPct);
+      final double anchor = (baseDays != null && baseDays > 0)
+          ? baseDays.toDouble()
+          : 360.0; // default 12 months when anchor missing
+      final double ratio = (predictedDays.toDouble() / anchor).clamp(0.0, 1.5);
+      if (ratio >= 0.9) {
+        normalizedSeverity = 'mild';
+      } else if (ratio >= 0.6) {
+        normalizedSeverity = 'moderate';
+      } else {
+        normalizedSeverity = 'severe';
+      }
     }
 
     final int severityRank = _severityRank(normalizedSeverity);
@@ -1688,10 +2188,12 @@ class ResultsPage extends StatelessWidget {
   
   Widget _buildSeverityAndDefectiveTiles(ColorScheme colorScheme) {
     final summary = _getDefectSummary();
-    final List<dynamic> detections = _getDetections();
+    final List<dynamic> rawDetections = _getDetections();
+    final List<dynamic> detections = _filterOutGoodBeanDetections(rawDetections);
+    final bool hasGoodBeans = _hasGoodBeans(rawDetections);
     final double? shelfLifePct =
         _asDouble(shelfLife?['defect_percentage'] ?? shelfLife?['defective_percent']);
-    final int totalDefects =
+    final int rawTotalDefects =
         summary?['total_defects'] is num ? (summary!['total_defects'] as num).toInt() : detections.length;
     final double? summaryPct = _asDouble(summary?['defect_percentage']);
 
@@ -1700,8 +2202,18 @@ class ResultsPage extends StatelessWidget {
       resolvedPctCandidate = summaryPct;
     }
 
+    final bool hasDetectedDefects = rawTotalDefects > 0 || detections.isNotEmpty;
+    final bool hasGoodBeansOnly = hasGoodBeans && !hasDetectedDefects;
+    final int totalDefects = hasGoodBeansOnly ? 0 : rawTotalDefects;
+
     double resolvedPctValue;
-    if (totalDefects > 0) {
+    final int highestRank = math.max(
+      _highestDefectTypeRank(detections),
+      _highestDefectTypeRankFromMap(summary?['defect_types']),
+    );
+    if (hasGoodBeansOnly) {
+      resolvedPctValue = 0.0;
+    } else if (totalDefects > 0) {
       double? detectionDrivenPct = resolvedPctCandidate;
       if (detectionDrivenPct == null || detectionDrivenPct <= 0) {
         detectionDrivenPct = _estimateDefectPercentageFromDetections(detections) ??
@@ -1717,8 +2229,8 @@ class ResultsPage extends StatelessWidget {
       }
     }
 
+    resolvedPctValue = math.max(resolvedPctValue, _severityFloorPct(highestRank));
     final double defectivePct = resolvedPctValue.clamp(0.0, 100.0);
-    final bool hasDetectedDefects = totalDefects > 0 || detections.isNotEmpty;
 
     final String computedSeverity = _computeSeverityFromPercentage(defectivePct);
     final String? rawSeverity = summary?['severity'] as String? ?? (shelfLife?['severity'] as String?);
@@ -1732,7 +2244,17 @@ class ResultsPage extends StatelessWidget {
       severityLabel = computedRank > existingRank ? computedSeverity : normalizedSeverity;
     }
 
-    if (!hasDetectedDefects) {
+    final String? rankSeverity = _severityLabelForRank(highestRank);
+    if (hasDetectedDefects &&
+        rankSeverity != null &&
+        _severityRank(rankSeverity) > _severityRank(severityLabel)) {
+      severityLabel = rankSeverity;
+    }
+
+    if (!hasDetectedDefects && !hasGoodBeansOnly) {
+      severityLabel = 'normal';
+    }
+    if (hasGoodBeansOnly) {
       severityLabel = 'normal';
     }
 
@@ -1781,8 +2303,11 @@ class ResultsPage extends StatelessWidget {
     if (defectDetection == null && shelfLife == null) return null;
 
     Map<String, dynamic> summary = {};
+    int highestRank = 0;
+    bool hasGoodBeans = _hasGoodBeans(_getDetections());
     if (defectDetection?['summary'] is Map<String, dynamic>) {
       summary = Map<String, dynamic>.from(defectDetection!['summary'] as Map);
+      highestRank = math.max(highestRank, _highestDefectTypeRankFromMap(summary['defect_types']));
     } else if (defectDetection != null) {
       final dd = Map<String, dynamic>.from(defectDetection!);
       final String type = (dd['defect_type'] as String?) ?? 'unknown';
@@ -1796,12 +2321,35 @@ class ResultsPage extends StatelessWidget {
       };
     }
 
+    int removedGoodBeanCounts = 0;
+    if (summary['defect_types'] is Map) {
+      final Map<String, dynamic> types = Map<String, dynamic>.from(summary['defect_types'] as Map);
+      final Map<String, dynamic> filtered = {};
+      types.forEach((key, value) {
+        if (_isGoodBeansType(key.toString())) {
+          if (value is num) removedGoodBeanCounts += value.toInt();
+          return;
+        }
+        filtered[key] = value;
+      });
+      summary['defect_types'] = filtered;
+      if (removedGoodBeanCounts > 0) {
+        hasGoodBeans = true;
+      }
+      if (removedGoodBeanCounts > 0) {
+        final int currentTotal = _asInt(summary['total_defects']) ?? 0;
+        summary['total_defects'] = math.max(0, currentTotal - removedGoodBeanCounts);
+      }
+      highestRank = math.max(highestRank, _highestDefectTypeRankFromMap(filtered));
+    }
+
     final Map<String, dynamic>? shelfLifeData =
         shelfLife != null ? Map<String, dynamic>.from(shelfLife!) : null;
     final double? shelfLifePct =
         _asDouble(shelfLifeData?['defect_percentage'] ?? shelfLifeData?['defective_percent']);
 
     final detections = _getDetectionsForSummary();
+    highestRank = math.max(highestRank, _highestDefectTypeRank(detections));
     if (!summary.containsKey('total_defects') ||
         summary['total_defects'] == null ||
         (_asInt(summary['total_defects']) ?? 0) == 0 && detections.isNotEmpty) {
@@ -1819,6 +2367,7 @@ class ResultsPage extends StatelessWidget {
       final shelfLifeCounts = Map<String, dynamic>.from(shelfLifeCountsRaw);
       for (final entry in shelfLifeCounts.entries) {
         final key = entry.key.toString().toLowerCase();
+        if (_isGoodBeansType(key)) continue;
         final value = entry.value;
         if (value is num) {
           final current = typeCounts[key] ?? 0;
@@ -1826,11 +2375,22 @@ class ResultsPage extends StatelessWidget {
         }
       }
     }
+    highestRank = math.max(highestRank, _highestDefectTypeRankFromMap(typeCounts));
     if (typeCounts.isNotEmpty) {
       summary['defect_types'] =
           typeCounts.map((key, value) => MapEntry(_formatDefectType(key), value));
       final int countsTotal = typeCounts.values.fold(0, (prev, value) => prev + value);
       summary['total_defects'] = math.max(_asInt(summary['total_defects']) ?? 0, countsTotal);
+    }
+
+    final Map<String, dynamic>? summaryDefectTypes =
+        summary['defect_types'] is Map ? Map<String, dynamic>.from(summary['defect_types'] as Map) : null;
+    final bool hasDefectTypes = summaryDefectTypes != null && summaryDefectTypes.isNotEmpty;
+    if (hasGoodBeans && !hasDefectTypes && detections.isEmpty) {
+      summary['total_defects'] = 0;
+      summary['defect_percentage'] = 0.0;
+      summary['severity'] = 'normal';
+      summary['quality_grade'] ??= 'A';
     }
 
     final String? currentQuality = summary['quality_grade'] as String?;
@@ -1876,15 +2436,29 @@ class ResultsPage extends StatelessWidget {
       summaryPctValue = fallbackPercentage;
     }
 
+    if (hasGoodBeans && (_asInt(summary['total_defects']) ?? 0) == 0 && detections.isEmpty) {
+      summaryPctValue = 0.0;
+    }
+
+    summaryPctValue = math.max(summaryPctValue, _severityFloorPct(highestRank));
     final double cappedPct = summaryPctValue.clamp(0.0, 100.0);
     summary['defect_percentage'] = cappedPct;
-    final String normalizedSeverity =
+    String normalizedSeverity =
         _normalizeSeverityTag(severity) ?? _computeSeverityFromPercentage(cappedPct);
+    final String? rankSeverity = _severityLabelForRank(highestRank);
+    if (rankSeverity != null && _severityRank(rankSeverity) > _severityRank(normalizedSeverity)) {
+      normalizedSeverity = rankSeverity;
+    }
     summary['severity'] = normalizedSeverity;
 
     final int normalizedTotalDefects = _asInt(summary['total_defects']) ?? detections.length;
     if (normalizedTotalDefects <= 0 && detections.isEmpty) {
-      summary['severity'] = 'normal';
+      if (hasGoodBeans) {
+        summary['severity'] = 'mild';
+        summary['defect_percentage'] = 0.0;
+      } else {
+        summary['severity'] = 'normal';
+      }
     }
 
     return summary;
@@ -1900,7 +2474,8 @@ class ResultsPage extends StatelessWidget {
   List<dynamic> _getDetectionsForSummary() {
     if (defectDetection == null) return const [];
     final dynamic filteredList = defectDetection?['detections'];
-    return _normalizeDetectionList(filteredList ?? defectDetection);
+    final normalized = _normalizeDetectionList(filteredList ?? defectDetection);
+    return _filterOutGoodBeanDetections(normalized);
   }
 
   List<Map<String, dynamic>> _normalizeDetectionList(dynamic listData) {
@@ -2079,7 +2654,9 @@ class ResultsPage extends StatelessWidget {
     final double confidenceAdjustment = (normalizedConfidence - 0.5) * 50.0;
     final double countAdjustment = countFactor * 35.0;
     final double estimated = base + confidenceAdjustment + countAdjustment;
-    return estimated.clamp(24.0, 95.0);
+    final double withRankFloor =
+        math.max(estimated, _severityFloorPct(_highestDefectTypeRank(detections)));
+    return withRankFloor.clamp(24.0, 95.0);
   }
 
   // Derive a readable shelf-life status if backend did not store the category
@@ -2089,7 +2666,7 @@ class ResultsPage extends StatelessWidget {
     if (days >= 20) return 'Good';
     if (days >= 10) return 'Warning';
     if (days > 0) return 'Critical';
-    return 'Unknown';
+    return 'Critical';
   }
 
   // Derive a quality grade from defect percentage for history rows
@@ -2713,5 +3290,3 @@ class DefectAnnotationPainter extends CustomPainter {
     return parsed;
   }
 }
-
-

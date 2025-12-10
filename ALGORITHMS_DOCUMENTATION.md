@@ -345,280 +345,96 @@ def _get_quality_grade(self, score: float) -> str:
 
 ## 3. SHELF LIFE PREDICTION ALGORITHM
 
-### 3.1 Rule-Based Shelf Life Model
+### 3.1 Table-aligned rule-based model
 
 ```python
 class RuleBasedShelfLife:
-    """Rule-based shelf life prediction based on defect analysis"""
-    
     def __init__(self):
-        # Defect severity weights (higher = more critical)
+        self.grade_baselines_months = {
+            'specialty': (24.0, 36.0),   # No defects (specialty grade)
+            'commodity': (12.0, 24.0),   # No defects (commodity)
+        }
+        self.bean_grade_map = {
+            'arabica': 'specialty',
+            'liberica': 'specialty',
+            'excelsa': 'specialty',
+            'robusta': 'commodity',
+            'other': 'commodity',
+        }
         self.defect_weights = {
-            'insect_damage': 8.0,
-            'discoloration': 6.0,
-            'physical_damage': 4.0,
-            'quaker': 7.0,
-            'shell': 3.0,
-            'under_roast': 2.0,
-            'roasted-beans': 1.0,
-            'nugget': 5.0
+            'fully_black': 12.0,
+            'black_bean': 12.0,
+            'insect_damage': 9.0,
+            'insect': 9.0,
+            'borer': 9.0,
+            'physical_damage': 5.0,
+            'broken': 5.0,
+            'broken_cut': 5.0,
+            'roasted-beans': 2.0,
+            'unknown': 1.5,
         }
-        
-        # Base shelf life by bean type (in days) -- modelled as multi-month storage
-        self.base_shelf_life = {
-            'Arabica': 240,   # ≈8 months
-            'Robusta': 210,   # ≈7 months
-            'Liberica': 225,  # ≈7.5 months
-            'Excelsa': 210,   # ≈7 months
-            'Other': 180      # ≈6 months fallback
+        self.scenario_profiles = {
+            'clean_specialty': {'months_range': (24.0, 36.0), 'category': 'No defects (specialty grade)', 'severity': 'normal'},
+            'clean_commodity': {'months_range': (12.0, 24.0), 'category': 'No defects (commodity)', 'severity': 'normal', 'scale_with_grade': False},
+            'broken_cut': {'months_range': (18.0, 27.0), 'reduction_range': (0.10, 0.25), 'category': 'Broken/cut beans', 'severity': 'mild'},
+            'insect': {'months_range': (12.0, 16.0), 'reduction_range': (0.30, 0.50), 'category': 'Insect damage', 'severity': 'moderate'},
+            'black': {'months_range': (10.0, 14.0), 'reduction_range': (0.40, 0.60), 'category': 'Fully black beans', 'severity': 'severe'},
+            'mixed': {'reduction_range': (0.30, 0.70), 'category': 'Multiple defects mixed', 'severity': 'severe'},
         }
-        
-        # Severity bands (percentage ranges with peak values and scaling information)
-        self.severity_bands = [
-            {
-                'name': 'mild',
-                'percent_range': (0.0, 22.0),
-                'percent_peak': 8.0,
-                'month_edges': (0.60, 0.82),   # scale at range edges
-                'month_peak': 0.96,            # scale near peak
-                'confidence_edges': (0.78, 0.88),
-                'confidence_peak': 0.95,
-            },
-            {
-                'name': 'moderate',
-                'percent_range': (18.0, 78.0),
-                'percent_peak': 45.0,
-                'month_edges': (0.28, 0.52),
-                'month_peak': 0.62,
-                'confidence_edges': (0.42, 0.64),
-                'confidence_peak': 0.74,
-            },
-            {
-                'name': 'severe',
-                'percent_range': (70.0, 100.0),
-                'percent_peak': 90.0,
-                'month_edges': (0.08, 0.20),
-                'month_peak': 0.18,
-                'confidence_edges': (0.18, 0.38),
-                'confidence_peak': 0.5,
-            },
-        ]
 ```
 
-### 3.2 Shelf Life Prediction Core Algorithm
+### 3.2 Shelf life prediction (core flow)
 
-```python
-def predict_shelf_life(self, defect_sequence, bean_type='Arabica', confidence_threshold: float = 0.7):
-    """Predict shelf life based on defect analysis using rule-based approach"""
-    
-    # Handle different input formats
-    if isinstance(defect_sequence, list):
-        defects = defect_sequence
-    elif hasattr(defect_sequence, 'tolist'):
-        defects = defect_sequence.tolist()
-    else:
-        defects = []
-    
-    # Start with base shelf life for the bean type
-    base_days = self.base_shelf_life.get(bean_type, self.base_shelf_life['Other'])
-    base_months = base_days / 30.0
-    predicted_days = base_days
-    
-    # Calculate defect impact
-    total_defect_score = 0
-    defect_counts = {}
-    total_detected = 0
-    cumulative_confidence = 0.0
-    
-    # Count and score defects
-    for defect in defects:
-        if isinstance(defect, dict):
-            defect_type = defect.get('type', 'unknown')
-            confidence = defect.get('confidence', 0.5)
-            count = defect.get('count', 1)
-        else:
-            # Handle simple defect type strings
-            defect_type = str(defect).lower()
-            confidence = 1.0
-            count = 1
-        
-        # Get defect weight
-        weight = self.defect_weights.get(defect_type, 1.0)
-        
-        # Calculate impact (weight * confidence * count)
-        impact = weight * confidence * count
-        total_defect_score += impact
-        
-        # Track defect counts
-        defect_counts[defect_type] = defect_counts.get(defect_type, 0) + count
-        total_detected += count
-        cumulative_confidence += confidence * count
-    
-    avg_detection_confidence = (cumulative_confidence / total_detected) if total_detected > 0 else 0.0
-    
-    # Translate raw defect score into a 0-100% indicator
-    normalized_score = min(total_defect_score / 45.0, 1.5)  # allow slight spillover for severe cases
-    defect_percentage = max(0.0, min(100.0, normalized_score * 100.0))
-    
-    band = self._select_severity_band(defect_percentage)
-    severity = band['name']
-    percent_low, percent_high = band['percent_range']
-    span = band['span']
-    severity_position = min(1.0, max(0.0, (defect_percentage - percent_low) / span))
-    peak_position = band['peak_position']
-    
-    edge_low, edge_high = band['month_edges']
-    peak_scale = band['month_peak']
+1. **Score defects**: normalize defect types, ignore benign ones, compute `impact = weight * confidence * count`, and accumulate totals. Defect percentage = `clamp(min(score / 20.0, 1.6) * 100, 0, 100)`.
+2. **Map to table buckets**: bin counts into `black`, `insect`, `broken`, `other`. Choose a scenario: if multiple buckets are present ? `mixed`; else black ? insect ? broken ? clean (specialty/commodity from bean type).
+3. **Baseline range**: fetch the scenario month range and scale with bean grade (specialty factor 1.0; commodity factor based on grade midpoint vs specialty midpoint). `mixed` falls back to the grade baseline with a 30?70% drop when no explicit range is present.
+4. **Place the estimate**: intensity = clamp(score / 18.0 + bonus_for_multiple_buckets, scenario_floor, 1). Position = `0.68 - 0.45 * intensity` clamped to [0.2, 0.85]; `predicted_months = months_min + (months_max - months_min) * position`, then convert to days.
+5. **Confidence**: start from profile base confidence, subtract an intensity penalty, scale by detection confidence/count, clamp to 0.25?0.96. If below `confidence_threshold`, category becomes `Uncertain` and confidence is nudged up slightly.
+6. **Output**: days/months estimate + range, category/severity, bean-grade quality, confidence, defect score/percentage/counts, defect category breakdown, storage note, reduction applied vs grade midpoint, and the profile key used.
 
-    severity_scale = self._interpolate_with_peak(
-        severity_position,
-        peak_position,
-        edge_low,
-        edge_high,
-        peak_scale,
-    )
-    predicted_months = max(0.1, base_months * severity_scale)
-    predicted_days = int(predicted_months * 30)
-    
-    # Additional guard rails for extreme insect damage
-    if defect_counts.get('insect_damage', 0) > 2:
-        predicted_months = min(predicted_months, base_months * 0.2)
-        predicted_days = int(predicted_months * 30)
-    
-    predicted_days = max(0, predicted_days)
-    
-    confidence = self._interpolate_with_peak(
-        severity_position,
-        peak_position,
-        band['confidence_edges'][0],
-        band['confidence_edges'][1],
-        band['confidence_peak'],
-    )
-    
-    if total_detected:
-        confidence -= min(0.18, (total_detected - 1) * 0.02)
-        confidence *= (0.85 + 0.15 * avg_detection_confidence)
-    
-    confidence = max(0.2, min(0.96, confidence))
-    
-    months_scale_candidates = [edge_low, edge_high, peak_scale, severity_scale]
-    valid_scales = [s for s in months_scale_candidates if s is not None]
-    months_min = max(0.1, base_months * min(valid_scales))
-    months_max = max(months_min, base_months * max(valid_scales))
-    
-    # Categorise shelf life and quality grade
-    if severity == "mild":
-        category = "Excellent"
-        quality_grade = "Grade A"
-    elif severity == "moderate":
-        category = "Warning" if defect_percentage > 40 else "Good"
-        quality_grade = "Grade B" if defect_percentage <= 30 else "Grade C"
-    else:
-        category = "Critical"
-        quality_grade = "Grade D"
-    
-    # Ensure confidence thresholding behaviour
-    if confidence < confidence_threshold:
-        category = "Uncertain"
-        confidence = max(0.15, confidence_threshold - 0.05)
-    
-    return {
-        'predicted_days': max(0, int(predicted_days)),
-        'category': category,
-        'confidence': round(min(0.96, confidence), 4),
-        'raw_prediction': predicted_months * 30,
-        'defect_score': round(total_defect_score, 3),
-        'defect_counts': defect_counts,
-        'defect_percentage': round(defect_percentage, 1),
-        'average_detection_confidence': round(avg_detection_confidence, 3),
-        'total_defects_detected': total_detected,
-        'severity': severity,
-        'severity_position': round(severity_position, 3),
-        'estimated_months': round(predicted_months, 1),
-        'estimated_months_range': {
-            'min': round(months_min, 1),
-            'max': round(months_max, 1)
-        },
-        'quality_grade': quality_grade,
-        'base_shelf_life': base_days
-    }
-```
+### 3.3 Table summary
 
-### 3.3 Severity Band Selection and Interpolation
-
-```python
-def _select_severity_band(self, percentage: float) -> dict:
-    # Choose the first band containing the percentage; if none, pick the closest by range distance.
-    for band in self.severity_bands:
-        low, high = band['percent_range']
-        if low <= percentage <= high:
-            return self._prepare_band(band)
-
-    # Fallback: choose band whose range midpoint is closest to percentage
-    def distance(b):
-        low, high = b['percent_range']
-        midpoint = (low + high) / 2
-        return abs(percentage - midpoint)
-
-    band = min(self.severity_bands, key=distance)
-    return self._prepare_band(band)
-
-def _prepare_band(self, band: dict) -> dict:
-    prepared = dict(band)
-    low, high = prepared['percent_range']
-    span = max(1.0, high - low)
-    peak = prepared['percent_peak']
-    peak_position = (peak - low) / span
-    prepared['span'] = span
-    prepared['peak_position'] = min(1.0, max(0.0, peak_position))
-    return prepared
-
-def _interpolate_with_peak(self, position: float, peak_position: float, edge_low: float, edge_high: float, peak_value: float) -> float:
-    position = min(1.0, max(0.0, position))
-    peak_position = min(1.0, max(0.0, peak_position))
-
-    if peak_position == 0.0:
-        # Avoid division by zero, fall back to edge_high trajectory
-        return peak_value + (edge_high - peak_value) * position
-    if peak_position == 1.0:
-        return edge_low + (peak_value - edge_low) * position
-
-    if position <= peak_position:
-        t = position / peak_position
-        return edge_low + (peak_value - edge_low) * t
-    else:
-        denom = (1.0 - peak_position)
-        if denom <= 0.0:
-            return peak_value
-        t = (position - peak_position) / denom
-        return peak_value + (edge_high - peak_value) * t
-```
-
----
+| Scenario (category)          | Target range (months) | Reduction guide | Note                    |
+|------------------------------|-----------------------|-----------------|-------------------------|
+| No defects (specialty grade) | 24-36                 | -              | Best storage stability  |
+| No defects (commodity)       | 12-24                 | -              | Faster fade             |
+| Broken/cut beans             | 18-27                 | drop 10-25%    | Mild risk               |
+| Insect damage                | 12-16                 | drop 30-50%    | Significant oxidation   |
+| Fully black beans            | 10-14                 | drop 40-60%    | High microbial load     |
+| Multiple defects mixed       | Very variable         | drop 30-70%    | Synergistic degradation |
 
 ## Key Formulas
 
 ### Defect Impact Calculation
 ```
-Impact = Weight × Confidence × Count
-Total_Defect_Score = Σ(Impact_i) for all defects i
+Impact = weight * confidence * count
+Total_Defect_Score = sum(impact_i) for all defects i
 ```
 
 ### Defect Percentage Normalization
 ```
-normalized_score = min(total_defect_score / 45.0, 1.5)
-defect_percentage = max(0.0, min(100.0, normalized_score * 100.0))
+normalized_score = min(total_defect_score / 20.0, 1.6)
+defect_percentage = clamp(normalized_score * 100, 0, 100)
 ```
 
-### Shelf Life Prediction
+### Range Placement
 ```
-predicted_months = base_months × severity_scale
-predicted_days = predicted_months × 30
+intensity = clamp(score / 18.0 + bonus_for_multiple_buckets, floor, 1.0)
+position = clamp(0.68 - 0.45 * intensity, 0.2, 0.85)
+predicted_months = months_min + (months_max - months_min) * position
+predicted_days = predicted_months * 30
 ```
 
-### Quality Score Calculation
+### Grade Scale
 ```
-score = 1.0 - (defect_percentage_penalty) - (defect_count_penalty) - (severity_penalty)
+grade_scale = midpoint(grade_baseline) / midpoint(specialty_baseline)
+```
+
+### Confidence
+```
+confidence = base_confidence - 0.22 * intensity
+confidence *= (0.85 + 0.15 * avg_detection_confidence)
+confidence = clamp(confidence, 0.25, 0.96)
 ```
 
 ---

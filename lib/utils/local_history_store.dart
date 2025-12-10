@@ -93,6 +93,18 @@ class CachedHistoryEntry {
       'confidence': prediction.confidence,
       'all_probabilities': prediction.allProbabilities,
     };
+    Map<String, dynamic>? normalizedShelf = shelfLife != null ? Map<String, dynamic>.from(shelfLife) : null;
+    // Normalize months from days if present
+    if (normalizedShelf != null &&
+        !normalizedShelf.containsKey('estimated_months') &&
+        !normalizedShelf.containsKey('predicted_months')) {
+      final dynamic pd = normalizedShelf['predicted_days'] ?? normalizedShelf['raw_prediction'];
+      if (pd is num) {
+        final double pm = pd.toDouble() / 30.0;
+        normalizedShelf['estimated_months'] = pm;
+        normalizedShelf['predicted_months'] = pm;
+      }
+    }
 
     return CachedHistoryEntry(
       historyId: response['history_id'] as int?,
@@ -104,7 +116,7 @@ class CachedHistoryEntry {
       createdAt: DateTime.now(),
       predictionData: predictionMap,
       defectDetection: defectDetection,
-      shelfLife: shelfLife,
+      shelfLife: normalizedShelf ?? shelfLife,
     );
   }
 }

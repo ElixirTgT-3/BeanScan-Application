@@ -9,7 +9,11 @@
 // 3. The selected override is applied to the prediction before showing results
 // 4. If no taps are made, the original AI prediction is used
 
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 /// The 4 coffee bean types in CoffeeNet order
 const List<String> kBeanTypes = ['Liberica', 'Arabica', 'Robusta', 'Excelsa'];
@@ -26,26 +30,32 @@ class DemoOverride {
   /// Whether demo mode is enabled (triple-tap About to toggle)
   bool _enabled = false;
   
+  /// Volume listener subscription
+  StreamSubscription<dynamic>? _volumeSubscription;
+
   /// Get whether demo mode is enabled
   bool get isEnabled => _enabled;
   
   /// Toggle demo mode on/off
   void toggle() {
-    _enabled = !_enabled;
-    if (!_enabled) {
-      _overrideIndex = -1; // Reset override when disabling
+    if (_enabled) {
+      disable();
+    } else {
+      enable();
     }
   }
   
   /// Enable demo mode
   void enable() {
     _enabled = true;
+    _startVolumeListener();
   }
   
   /// Disable demo mode
   void disable() {
     _enabled = false;
     _overrideIndex = -1;
+    _stopVolumeListener();
   }
   
   /// Get the current override bean type (null if no override)
@@ -155,6 +165,40 @@ class DemoOverride {
     applyProbabilityOverride('probabilities');
 
     return modified;
+  }
+
+  void _startVolumeListener() {
+    // Only attach on Android (channel implemented natively)
+    if (!Platform.isAndroid) return;
+    if (_volumeSubscription != null) return;
+
+    try {
+      const EventChannel channel = EventChannel('beanscan/volume_buttons');
+      debugPrint('[DemoOverride] Subscribing to volume button channel...');
+      _volumeSubscription = channel.receiveBroadcastStream().listen(
+        (dynamic event) {
+          if (!_enabled) return;
+
+          debugPrint('[DemoOverride] Volume channel event: $event');
+          if (event is String && event == 'VOLUME_DOWN') {
+            disable();
+            debugPrint('[DemoOverride] Volume down pressed - override disabled');
+          }
+        },
+        onError: (Object error) {
+          debugPrint('[DemoOverride] Volume listener error: $error');
+        },
+      );
+    } on MissingPluginException catch (e) {
+      debugPrint('[DemoOverride] Volume channel missing: $e');
+    } catch (e) {
+      debugPrint('[DemoOverride] Unable to attach volume listener: $e');
+    }
+  }
+
+  void _stopVolumeListener() {
+    _volumeSubscription?.cancel();
+    _volumeSubscription = null;
   }
 }
 
